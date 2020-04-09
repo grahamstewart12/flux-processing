@@ -19,11 +19,110 @@ library(openeddy)
 library(lubridate)
 library(tidyverse)
 
-source("~/Desktop/DATA/Flux/tools/engine/combine_biomet.R")
+#source("~/Desktop/DATA/Flux/tools/engine/combine_biomet.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
-# Initialize script settings & documentation
-script_init(settings, site_metadata)
+
+### Helper functions ===========================================================
+
+# - mostly wrappers to simplify computation
+
+potential_radiation <- function(timestamp, md) {
+  
+  yday <- lubridate::yday(timestamp)
+  hour <- decimal_hour(timestamp)
+  
+  bigleaf::potential.radiation(yday, hour, md$lat, md$lon, md$tz)
+}
+
+sun_position <- function(timestamp, md) {
+  
+  sun_pos <- solartime::computeSunPosition(timestamp, md$lat, md$lon)
+  
+  sun_pos %>% 
+    tibble::as_tibble() %>% 
+    dplyr::pull(elevation)
+}
+
+apply_offset <- function(x, offset) {
+  
+  # Do this safely - don't accidentally apply offsets twice
+  if (!is.null(attr(x, "offset"))) stop("Offset has already been applied.")
+  
+  out <- x + offset
+  attr(out, "offset") <- offset
+  out
+}
+
+sun_time <- function(sol_ang) {
+  
+  dplyr::case_when(
+    magrittr::and(
+      sol_ang > 0,
+      lag(sol_ang, 1) < 0 | lag(sol_ang, 2) < 0 | lag(sol_ang, 3) < 0
+    ) ~ "rise",
+    magrittr::and(
+      sol_ang < 0,
+      lag(sol_ang, 1) > 0 | lag(sol_ang, 2) > 0 | lag(sol_ang, 3) > 0
+    ) ~ "set",
+    sol_ang > 0 ~ "day",
+    sol_ang < 0 ~ "night"
+  )
+}
+
+clearness_index <- function(sw_in, sw_in_pot, night_pot) {
+  
+  kt <- pmin(pmax(sw_in, 0) / sw_in_pot, 1)
+  dplyr::if_else(night_pot, NA_real_, kt)
+}
+
+flag_biomet_system <- function(data, vars = c(ta, lw_in, lw_out)) {
+  
+  # Suggested vars chosen using the criteria:
+  # 1) not directly dependent, 2) unlikely to have natural runs, 3) not repped
+  vars <- rlang::enquo(vars)
+  
+  tbl <- dplyr::select(data, !!vars)
+  
+  tbl %>%
+    dplyr::mutate_all(flag_repeats) %>%
+    dplyr::mutate_all(dplyr::na_if, 0) %>%
+    as.list() %>%
+    purrr::pmap_int(~ sum(.)) %>%
+    tidyr::replace_na(0L)
+}
+
+
+### Initialize script settings & documentation =================================
+
+# Load metadata file
+md <- purrr::pluck(site_metadata, settings$site)
+
+# Set the desired working directory in RStudio interface
+# - assumes that the subdirectory structure is already present
+wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+path_in <- file.path(wd, "processing_data", "02_combine_eddypro", "output")
+# Input file - biomet output with QC flags
+biomet_input <- latest_version(path_in, "eddypro_combined")
+
+# Set tag for creating output file names
+tag_out <- create_tag(settings$site, settings$year, settings$date)
+
+# Set path for output files
+path_out <- file.path(wd, "processing_data", "03_combine_biomet", "output")
+
+# List of vars housed in the biomet system
+biomet_vars <- rlang::exprs(
+  ta, rh, ppfd_in, sw_in, sw_out, lw_in, lw_out, p_rain,
+  dplyr::matches(c("^ts_|^swc_|^g_"))
+)
+
+# List of vars with reps
+rep_vars <- list(
+  g = expr(list(g_1_1_1, g_2_1_1, g_3_1_1)),
+  swc = expr(list(swc_1_1_1, swc_2_1_1, swc_3_1_1)),
+  ts = expr(list(ts_1_1_1, ts_2_1_1, ts_3_1_1))
+)
 
 
 ### Load & clean up the Biomet file ============================================
