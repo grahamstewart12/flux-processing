@@ -259,14 +259,15 @@ biomet_auto_flags <- function(data, var, p_rain) {
   
   
   # Operates on days within years: null
-  # - no secondary checks since this already indicates underlying issues
+  # - no empirical checks since this already indicates underlying issues
+  # - but disregard flag if missing data is <10%
   dy <- tbl %>% 
     dplyr::select(x, year, date, timestamp) %>% 
     tidyr::nest(data = c(timestamp, x)) %>% 
     dplyr::mutate(
       x = purrr::map(data, dplyr::pull, x),
-      # Number of missing values
-      n = purrr::map_dbl(x, ~dplyr::na_if(length(na.omit(.)), 0))
+      # Number of non-missing values (exclude days that are entirely missing)
+      n = purrr::map_dbl(x, ~ dplyr::na_if(length(na.omit(.)), 0))
     ) %>%
     dplyr::select(-x) %>%
     tidyr::unnest(data) %>%
@@ -280,7 +281,11 @@ biomet_auto_flags <- function(data, var, p_rain) {
     ) %>% 
     dplyr::select(-n) %>% 
     tidyr::unnest(data) %>% 
-    dplyr::mutate(null = dplyr::if_else(n < n_lo, 2L, 0L)) %>%
+    dplyr::mutate(
+      null = dplyr::if_else(n < n_lo, 2L, 0L),
+      # Don't bother flagging if n missing is less than 6
+      null = dplyr::if_else(n > 42, pmax(null - 1L, 0L), null)
+    ) %>%
     dplyr::select(null)
   
   cat("done. ", sep = "")
@@ -458,6 +463,8 @@ rep_vars <- list(
 
 ### Biomet data initialization =================================================
 
+cat("Importing data files...")
+
 # Load the Biomet file
 biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
 
@@ -480,8 +487,12 @@ qc_biomet <- select(biomet, timestamp)
 #biomet %>% filter(ta == ta_ep) %>% summarize(n())
 #biomet %>% filter(rh == rh_ep & rh != 100) %>% summarize(n())
 
+cat("done.\n")
+
 
 ### Automatic statistical flags ================================================
+
+cat("Computing automatic sensor flags.\n")
 
 # Compute all auto flags
 auto_flags <- vars %>% 
@@ -506,7 +517,6 @@ for (i in seq_along(vars)) {
 
 # Plot all flags for each var
 auto_plots <- map2(vars, auto_flags, ~ plot_flags(biomet, !!.x, .y))
-#map(auto_plots, ~ .)
 
 # Add combined flag to QC dataset
 for (i in seq_along(vars)) {
@@ -516,6 +526,8 @@ for (i in seq_along(vars)) {
 
 
 ### Flag theoretically implausible values ======================================
+
+cat("Flagging unlikely conditions...")
 
 # Add p_rain to vars list
 all_vars <- append(vars, list(expr(p_rain)))
@@ -570,6 +582,8 @@ qc_biomet <- mutate(
     replace_na(0L)
 )
 
+cat("done.\n")
+
 
 ### Difference between analagous measurement flags =============================
 
@@ -586,6 +600,8 @@ qc_biomet <- bind_cols(
 
 
 ### Combine flags and check results ============================================
+
+cat("Combining flags and plotting results...")
 
 for (i in seq_along(all_vars)) {
   var_name <- rlang::as_string(all_vars[[i]])
@@ -604,7 +620,6 @@ for (i in seq_along(all_vars)) {
 flag_plots <- all_vars %>%
   map(~ plot_flags(biomet, !!., qc_biomet, geom = "line")) %>%
   set_names(str_c(map_chr(all_vars, rlang::as_label), "_flags"))
-#map(flag_plots, ~ .)
 
 # How many flagged?
 biomet %>%
@@ -618,13 +633,15 @@ biomet %>%
 qc_plots <- all_vars %>%
   map(~ plot_flags(biomet, !!., geom = "line")) %>%
   set_names(str_c(map_chr(all_vars, rlang::as_label), "_qc"))
-#map(qc_plots, ~ .)
 
 # Combine all plot lists
 plots <- append(flag_plots, qc_plots)
 
+cat("done.\n")
 
 ### Save output ================================================================
+
+cat("Writing output...")
 
 # Save processed Biomet dataset
 biomet_out <- file.path(path_out, str_c("biomet_qc_", tag_out, ".csv"))
@@ -657,5 +674,7 @@ plot_path <- file.path(path_out, paste0("biomet_qc_plots_", tag_out, ".pdf"))
 pdf(plot_path)
 map(plots, ~ .)
 dev.off()
+
+cat("done.\n")
 
 # Finished
