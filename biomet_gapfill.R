@@ -9,7 +9,7 @@
 # Output(s):
 
 # Load the required packages
-suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools", quiet = TRUE))
+suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(openeddy)
 library(REddyProc)
 library(lubridate)
@@ -21,8 +21,585 @@ source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 source("~/Desktop/DATA/Flux/tools/reference/var_attributes.R")
 source("~/Desktop/DATA/Flux/tools/reference/gf_control.R")
 
-# Initialize script settings & documentation
-script_init(settings, site_metadata)
+
+### Helper functions ===========================================================
+
+acf_1 <- function(x) {
+  acf <- acf(x, plot = FALSE, na.action = na.pass)$acf
+  acf %>% array_branch() %>% flatten_dbl() %>% pluck(2)
+}
+
+get_best_lag <- function(y, x, lag.max = 12) {
+  
+  dy <- y - dplyr::lag(y)
+  dx <- x - dplyr::lag(x)
+  
+  ccf <- ccf(dx, dy, lag.max = lag.max, na.action = na.pass, plot = FALSE)
+  
+  tbl <- tibble::tibble(
+    lag = ccf %>% 
+      purrr::pluck("lag") %>%
+      purrr::array_branch() %>%
+      purrr::simplify(),
+    acf = ccf %>% 
+      purrr::pluck("acf") %>%
+      purrr::array_branch() %>%
+      purrr::simplify()
+  )
+  
+  lag <- tbl %>%
+    dplyr::arrange(desc(acf)) %>%
+    dplyr::slice(1) %>%
+    purrr::pluck("lag")
+  
+  (-lag)
+}
+
+apply_lag <- function(x, lag) {
+  
+  if (lag >= 0) {
+    out <- dplyr::lag(x, lag)
+  } else {
+    out <- dplyr::lead(x, -lag)
+  }
+  
+  out
+}
+
+select_clean <- function(data, vars) {
+  
+  vars <- map_chr(vars, rlang::as_string)
+  df <- dplyr::select_at(data, vars(timestamp, all_of(vars)))
+  
+  get_qc_var <- function(x) {
+    rlang::as_string(x) %>%
+      stringr::str_c("qc_", .) %>%
+      rlang::sym()
+  }
+  
+  for (i in 2:length(df)) {
+    name <- names(df)[i]
+    qc_name <- get_qc_var(name)
+    df[, name] <- clean(df[, name], dplyr::pull(data, !!qc_name))
+  }
+  
+  df
+}
+
+roll_mean_real <- function(x, n = 1L) {
+  
+  m <- RcppRoll::roll_mean(x, n, fill = NA, na.rm = TRUE)
+  
+  # Only real x values get a roll_mean value
+  na_ind <- which(is.na(x))
+  m[na_ind] <- NA
+  
+  # Fill with original values where roll_mean is cut off at the ends
+  dplyr::coalesce(m, x)
+}
+
+plot_harmonies <- function(data, data_aux, aux_suffix) {
+  
+  sfx <- aux_suffix
+  sfx_ <- stringr::str_c("_", sfx)
+  
+  data_aux %>%
+    dplyr::rename_at(vars(-timestamp), ~stringr::str_c(., sfx_)) %>%
+    dplyr::left_join(data, by = "timestamp") %>%
+    tidyr::pivot_longer(-timestamp, names_to = "var", values_to = "value") %>%
+    dplyr::mutate(
+      site = dplyr::if_else(stringr::str_detect(var, sfx_), sfx, "site"),
+      var = stringr::str_remove(var, sfx_)
+    ) %>%
+    tidyr::pivot_wider(names_from = "site", values_from = "value") %>%
+    tidyr::drop_na() %>%
+    ggplot2::ggplot(ggplot2::aes(!!rlang::sym(sfx), site)) +
+    ggplot2::facet_wrap(~ var, scales = "free") +
+    ggplot2::geom_hex(
+      ggplot2::aes(alpha = log(..count..)), fill = "steelblue", bins = 20
+    ) +
+    ggplot2::geom_smooth(
+      method = "lm", formula = y ~ x, se = FALSE, size = 0.75, linetype = 2, 
+      color = "black"
+    ) +
+    ggplot2::scale_alpha_continuous(range = c(0.4, 1)) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(legend.position = "none")
+}
+
+debias_init <- function(data, aux_data, var, diff = FALSE, 
+                        type = c("lm", "lm0", "ratio"), lag = 0, ctrl) {
+  
+  # Handle vars with different names between datasets 
+  if (length(var) > 1) {
+    var1 <- rlang::enquo(var[1])
+    var2 <- rlang::enquo(var[2])
+  } else {
+    var1 <- rlang::enquo(var)
+    var2 <- rlang::enquo(var)
+  }
+  
+  # Get information from control list if provided
+  if (!missing(ctrl)) {
+    diff <- purrr::pluck(ctrl, var[1], "db_diff")
+    type <- purrr::pluck(ctrl, var[1], "db_type")
+    lag <- purrr::pluck(ctrl, var[1], "db_lag")
+  } else {
+    type <- rlang::arg_match(type)
+  }
+  #browser()
+  
+  tbl <- tibble::tibble(
+    y = dplyr::pull(data, !!var1),
+    x = dplyr::pull(aux_data, !!var2)
+  )
+  
+  # Difference if requested (useful for highly autocorrelated variables)
+  if (diff) tbl <- dplyr::mutate_all(tbl, ~ . - dplyr::lag(., 1))
+  
+  # Apply lag if indicated
+  if (lag < 0) {
+    tbl <- mutate(tbl, x = dplyr::lead(x, -lag))
+  } else {
+    tbl <- mutate(tbl, x = dplyr::lag(x, lag))
+  } 
+  
+  # Only include existing pairs of values 
+  tbl <- dplyr::mutate(
+    tbl,
+    y = dplyr::if_else(is.na(x), NA_real_, y),
+    x = dplyr::if_else(is.na(y), NA_real_, x)
+  )
+  tbl <- tidyr::drop_na(tbl)
+  
+  # Fit debiasing model
+  if (type == "lm") {
+    fit <- lm(y ~ x, data = tbl)
+    names(fit$coefficients) <- c("b", "m")
+  } else if (type == "lm0") {
+    fit <- lm(y ~ 0 + x, data = tbl)
+    fit$coefficients <- c(b = 0, m = unname(coef(fit)))
+  }  else if (type == "ratio") {
+    # Manually calculate coefficient for ratios
+    beta <- tbl %>%
+      dplyr::filter(sign(y) == sign(x) | sign(y) == 0 | sign(x) == 0) %>%
+      dplyr::summarize(beta = sum(abs(y)) / sum(abs(x))) %>%
+      purrr::pluck(1, 1)
+    # Assign coefficient as offset in lm
+    fit <- lm(y ~ 0 + x, data = tbl)
+    fit$coefficients <- c(b = 0, m = beta)
+  }
+  
+  # Add lag attribute for fit on differenced variables
+  if (diff) attr(fit, "lag") <- lag
+  
+  fit
+}
+
+debias <- function(data, aux_data, var, fit, diff = FALSE, lag = 0, ctrl) {
+  
+  # Function to help find QC variable
+  get_qc_var <- function(x) {
+    rlang::as_string(x) %>% stringr::str_c("qc_", .) %>% rlang::sym()
+  }
+  
+  # Handle vars with different names between datasets 
+  if (length(var) > 1) {
+    var1 <- rlang::enquo(var[1])
+    var2 <- rlang::enquo(var[2])
+  } else {
+    var1 <- rlang::enquo(var)
+    var2 <- rlang::enquo(var)
+  }
+  
+  # Get information from control list if provided
+  if (!missing(ctrl)) {
+    diff <- purrr::pluck(ctrl, var[1], "db_diff")
+    lag <- purrr::pluck(ctrl, var[1], "db_lag")
+  }
+  
+  tbl <- tibble::tibble(
+    y = dplyr::pull(data, !!var1),
+    x = dplyr::pull(aux_data, !!var2)
+  )
+  
+  # Apply lag if indicated
+  if (lag < 0) {
+    tbl <- mutate(tbl, x = dplyr::lead(x, -lag))
+  } else {
+    tbl <- mutate(tbl, x = dplyr::lag(x, lag))
+  } 
+  
+  # If differences, reconstruct data using time series fill
+  if (diff) {
+    out <- fill_along(tbl$y, tbl$x, coef(fit)[2], lag = 0, align = TRUE)
+    #out <- dplyr::if_else(is.na(tbl$x - dplyr::lag(tbl$x, 1)), NA_real_, out)
+  } else {
+    out <- coef(fit)[1] + coef(fit)[2] * tbl$x
+  }
+  
+  out
+}
+
+plot_fill_vars <- function(data, fill_name) {
+  
+  data %>%
+    tidyr::pivot_longer(-timestamp, values_to = fill_name) %>%
+    ggplot2::ggplot(ggplot2::aes(timestamp, !!rlang::sym(fill_name))) +
+    ggplot2::geom_line(na.rm = TRUE) +
+    ggplot2::facet_wrap(~ name, scales = "free") +
+    ggplot2::scale_x_datetime(date_labels = "%b") +
+    ggplot2::labs(x = NULL) +
+    ggplot2::theme_bw()
+}
+
+blend_vars <- function(data, aux_data, x, var1, var2, var3 = NULL, 
+                       diff = FALSE) {
+  
+  # In wetlands the "depth" of soil temperature changes with the water level
+  # - could be more accurate to allow "depth" to vary over time 
+  # - this function creates a blend two time series, where the weight given to 
+  #   each varies daily based on a regression with the dependent variable
+  
+  x <- rlang::enquo(x)
+  var1 <- rlang::enquo(var1)
+  var2 <- rlang::enquo(var2)
+  var3 <- rlang::enquo(var3)
+  
+  # THIS IS HORRIBLE but allowing n vars as [...] arg too complicated for now
+  if (rlang::quo_is_null(var3)) {
+    blend <- data %>%
+      dplyr::mutate(date = lubridate::date(timestamp), y = !!x) %>% 
+      dplyr::left_join(
+        dplyr::select(aux_data, timestamp, x1 = !!var1, x2 = !!var2), 
+        by = "timestamp"
+      ) %>%
+      dplyr::select(date, timestamp, y, x1, x2)
+    
+    if (diff) blend <- dplyr::mutate_if(blend, is.numeric, ~ . - dplyr::lag(.))
+    
+    blend <- blend %>%
+      tidyr::drop_na() %>%
+      tidyr::nest(data = c(timestamp, y, x1, x2)) %>%
+      dplyr::mutate(
+        lm = purrr::map(data, ~ lm(y ~ 0 + x1 + x2, data = .)), 
+        coefs = purrr::map(lm, coef), 
+        p1 = purrr::map_dbl(coefs, pluck, 1) %>% 
+          RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
+        p2 = purrr::map_dbl(coefs, pluck, 2) %>%
+          RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
+        tot = purrr::pmap_dbl(list(p1, p2), sum)
+      ) %>% 
+      dplyr::mutate_at(dplyr::vars(p1, p2), ~ pmax(pmin(. / tot, 1), 0)) %>%
+      tidyr::unnest(data) %>% 
+      # Smooth daily boundaries
+      dplyr::transmute(
+        timestamp = timestamp,
+        p1 = RcppRoll::roll_mean(p1, 21, na.rm = TRUE, fill = NA), 
+        p2 = RcppRoll::roll_mean(p2, 21, na.rm = TRUE, fill = NA)
+      )
+    
+    blend <- aux_data %>%
+      dplyr::select(timestamp, x1 = !!var1, x2 = !!var2) %>%
+      dplyr::left_join(blend, by = "timestamp") %>%
+      dplyr::mutate_at(
+        dplyr::vars(p1, p2), ~ dplyr::if_else(is.nan(.), NA_real_, .)
+      ) %>%
+      tidyr::fill(p1, p2, .direction = "downup") %>%
+      dplyr::mutate(b = x1 * p1 + x2 * p2)
+  } else {
+    
+    blend <- data %>%
+      dplyr::transmute(
+        timestamp = timestamp, date = lubridate::date(timestamp), y = !!x
+      ) %>% 
+      dplyr::left_join(dplyr::select(
+        aux_data, timestamp, x1 = !!var1, x2 = !!var2, x3 = !!var3
+      ), by = "timestamp")
+    
+    if (diff) blend <- dplyr::mutate_if(blend, is.numeric, ~ . - dplyr::lag(.))
+    
+    blend <- blend %>%
+      tidyr::drop_na() %>%
+      tidyr::nest(data = c(timestamp, y, x1, x2, x3)) %>%
+      dplyr::mutate(
+        lm = purrr::map(data, ~ lm(y ~ 0 + x1 + x2 + x3, data = .)), 
+        coefs = purrr::map(lm, coef), 
+        p1 = purrr::map_dbl(coefs, pluck, 1) %>% 
+          RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
+        p2 = purrr::map_dbl(coefs, pluck, 2) %>%
+          RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
+        p3 = purrr::map_dbl(coefs, pluck, 3) %>%
+          RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
+        tot = purrr::pmap_dbl(list(p1, p2, p3), sum)
+      ) %>% 
+      dplyr::mutate_at(dplyr::vars(p1, p2, p3), ~ pmax(pmin(. / tot, 1), 0)) %>%
+      tidyr::unnest(data) %>% 
+      # Smooth daily boundaries
+      dplyr::transmute(
+        timestamp = timestamp,
+        p1 = RcppRoll::roll_mean(p1, 21, na.rm = TRUE, fill = NA), 
+        p2 = RcppRoll::roll_mean(p2, 21, na.rm = TRUE, fill = NA),
+        p3 = RcppRoll::roll_mean(p3, 21, na.rm = TRUE, fill = NA)
+      )
+    
+    blend <- aux_data %>%
+      dplyr::select(timestamp, x1 = !!var1, x2 = !!var2, x3 = !!var3) %>%
+      dplyr::left_join(blend, by = "timestamp") %>%
+      dplyr::mutate_at(
+        dplyr::vars(p1, p2, p3), ~ dplyr::if_else(is.nan(.), NA_real_, .)
+      ) %>%
+      tidyr::fill(p1, p2, p3, .direction = "downup") %>%
+      dplyr::mutate(b = x1 * p1 + x2 * p2 + x3 * p3)
+  }
+  
+  dplyr::pull(blend, b)
+}
+
+flatten_period <- function(x, n, min_step = 1e-4, max_iter = 50) {
+  range <- range(x, na.rm = TRUE)
+  
+  out <- x
+  offset <- mean(out[1:n], na.rm = TRUE)
+  step <- min_step + 1
+  iter <- 0
+  
+  while (step > min_step & iter < max_iter) {
+    offset <- mean(out[1:n], na.rm = TRUE)
+    out <- 1 - abs(offset - out)
+    out <- scales::rescale(out, range)
+    step <- mean(abs(offset - out[1:n]), na.rm = TRUE)
+    iter <- iter + 1
+  }
+  
+  out
+}
+
+gather_fill_data <- function(data, var, backup, order, max_i, ctrl) {
+  
+  var_name <- rlang::as_string(var)
+  var <- rlang::ensym(var)
+  
+  # Get information from control list if provided
+  if (!missing(ctrl)) {
+    backup <- purrr::pluck(ctrl, var_name, "gf_backup")
+    order <- purrr::pluck(ctrl, var_name, "gf_order")
+    max_i <- purrr::pluck(ctrl, var_name, "gf_max_i")
+  }
+  
+  list <- list(x = dplyr::pull(data, !!var))
+  
+  # Gap filling method modules
+  
+  # "Backup" variable
+  if (!is.na(backup)) {
+    b_var <- rlang::ensym(backup)
+    # Simple de-bias in case sensors are slightly off
+    coef <- data %>% 
+      dplyr::select(!!var, !!b_var) %>% 
+      tidyr::drop_na() %>% 
+      dplyr::summarize(sum(!!var) / sum(!!b_var)) %>% 
+      purrr::pluck(1)
+    list <- append(list, list(b = dplyr::pull(data, !!b_var) * coef))
+  }
+  
+  # Potential radiation
+  if (stringr::str_detect(order, "p")) {
+    pot <- dplyr::pull(data, sw_in_pot)
+    
+    # - purpose is mostly to correct negative nighttime values
+    pot <- dplyr::if_else(pot == 0, pot, NA_real_)
+    list <- append(list, list(p = pot))
+  }
+  
+  # Interpolation
+  if (stringr::str_detect(order, "i")) {
+    i <- fill_linear(dplyr::pull(data, !!var), max_i)
+    # Remove included original values
+    i <- dplyr::if_else(!is.na(dplyr::pull(data, !!var)), NA_real_, i)
+    list <- append(list, list(i = i))
+  }
+  
+  # MDC
+  if (stringr::str_detect(order, "m")) {
+    m_var <- var_name %>% stringr::str_c(., "_f") %>% rlang::sym()
+    m_qc_var <- var_name %>% stringr::str_c(., "_fqc") %>% rlang::sym()
+    m <- clean(
+      dplyr::pull(data, !!m_var), dplyr::pull(data, !!m_qc_var), 
+      value = 3, na.as = NA
+    )
+    # Remove included original values
+    m <- dplyr::if_else(!is.na(dplyr::pull(data, !!var)), NA_real_, m)
+    list <- append(list, list(m = m))
+  }
+  
+  # De-biased auxilliary data
+  if (stringr::str_detect(order, "a")) {
+    a_var <- var_name %>% stringr::str_c(., "_d") %>% rlang::sym()
+    list <- append(list, list(a = dplyr::pull(data, !!a_var)))
+  }
+  
+  # De-biased ERA data
+  if (stringr::str_detect(order, "e")) {
+    e_var <- var_name %>% stringr::str_c(., "_df") %>% rlang::sym()
+    list <- append(list, list(e = dplyr::pull(data, !!e_var)))
+  }
+  
+  list
+}
+
+plan_fill <- function(list, backup, order, ctrl, var) {
+  
+  # Get information from control list if provided
+  if (!missing(ctrl)) {
+    backup <- purrr::pluck(ctrl, var, "gf_backup")
+    order <- purrr::pluck(ctrl, var, "gf_order")
+  }
+  
+  # Add backup as first method if backup var is detected
+  if (!is.na(backup)) order <- stringr::str_c("b", order)
+  
+  # Add "x" (original data) to front of list
+  order <- stringr::str_c("x", order)
+  
+  names <- order %>% stringr::str_split("") %>% purrr::pluck(1)
+  
+  # Gap-focused approach (Plan A)
+  gaps <- list %>%
+    # Replace non-missing values with the gapfill variable name
+    tibble::as_tibble() %>%
+    # Make sure fill vars are in the correct order
+    dplyr::select_at(dplyr::vars(tidyselect::all_of(names))) %>%
+    dplyr::mutate(
+      gap = dplyr::if_else(is.na(x), 1L, 0L),
+      gap_id = dplyr::pull(tidy_rle(gap), id),
+      gap_len = dplyr::pull(tidy_rle(gap), lengths)
+    ) %>%
+    dplyr::group_by(gap_id) %>%
+    dplyr::summarize_at(
+      dplyr::vars(-gap, -dplyr::group_cols()), ~ length(na.omit(.))
+    ) %>%
+    dplyr::ungroup()
+  
+  cover <- gaps %>%
+    dplyr::mutate(
+      # Do gap-fill vars cover at least part of a gap?
+      any = purrr::imap_dfr(
+        ., ~ dplyr::if_else(.x != 0, .y, NA_character_)
+      ) %>% 
+        dplyr::select_at(dplyr::vars(-dplyr::starts_with("gap"))) %>% 
+        purrr::pmap_chr(dplyr::coalesce), 
+      # Do gap-fill vars cover entire gaps?
+      all = purrr::imap_dfr(
+        ., ~ dplyr::if_else(.x == gap_len, .y, NA_character_)
+      ) %>% 
+        dplyr::select_at(dplyr::vars(-dplyr::starts_with("gap"))) %>% 
+        purrr::pmap_chr(dplyr::coalesce)
+    ) %>% 
+    dplyr::mutate(
+      plan = purrr::pmap_chr(dplyr::select(., all, any), dplyr::coalesce)
+    )
+  
+  plan_a <- rep(cover$all, times = cover$gap_len)
+  
+  # Point-focused approach (Plan B)
+  # Replace non-missing values with the gapfill variable name
+  tbl <- list %>% 
+    purrr::imap(~ replace_real(.x, .y)) %>%
+    tibble::as_tibble()
+  
+  # Make sure fill vars are in the correct order
+  inorder <- dplyr::select_at(tbl, dplyr::vars(tidyselect::all_of(names)))
+  
+  # Coalesce to form "Plan B"
+  plan_b <- dplyr::coalesce(!!!as.list(inorder))
+  
+  plan <- dplyr::coalesce(plan_a, plan_b)
+  
+  plan
+}
+
+qc_biomet_fmeth <- function(fmeth, mdc_fqc) {
+  
+  if (missing(mdc_fqc)) mdc_fqc <- rep(NA_integer_, length(fmeth))
+  
+  dplyr::case_when(
+    fmeth %in% c("x", "b") ~ 0L,
+    fmeth %in% c("p", "i") ~ 1L,
+    fmeth == "m" ~ as.integer(mdc_fqc),
+    fmeth == "a" ~ 2L,
+    fmeth == "e" ~ 3L,
+    TRUE ~ NA_integer_
+  )
+}
+
+plot_filled <- function(data, var, type = c("fmeth", "fqc")) {
+  
+  type <- rlang::arg_match(type)
+  var_name <- rlang::as_string(var)
+  var <- rlang::ensym(var)
+  
+  var_f <- var_name %>% stringr::str_c(., "_f") %>% rlang::sym()
+  
+  var_fmeth <- var_name %>% stringr::str_c(., "_fmeth") %>% rlang::sym()
+  
+  if (type == "fmeth") {
+    color <- var_fmeth
+  } else if (type == "fqc") {
+    color <- var_name %>% stringr::str_c(., "_fqc") %>% rlang::sym()
+    data <- dplyr::mutate(data, !!color := factor(!!color))
+  }
+  
+  type <- rlang::sym(type)
+  
+  filled <- dplyr::mutate(
+    data, 
+    !!var_f := dplyr::if_else(!is.na(!!var_fmeth), !!var_f, NA_real_),
+    !!type := !!color
+  )
+  
+  filled <- data %>%
+    dplyr::filter(!is.na(!!var_fmeth)) %>%
+    dplyr::mutate(!!type := !!color)
+  
+  data %>%
+    ggplot2::ggplot(ggplot2::aes(timestamp, !!var_f)) +
+    ggplot2::geom_line(na.rm = TRUE) +
+    ggplot2::geom_point(
+      data = filled, ggplot2::aes(color = !!type), size = 0.75, na.rm = TRUE
+    ) +
+    ggplot2::labs(x = NULL) +
+    ggplot2::theme_bw()
+}
+
+
+### Initialize script settings & documentation =================================
+
+# Load metadata file
+md <- purrr::pluck(site_metadata, settings$site)
+
+# Set the desired working directory in RStudio interface
+# - assumes that the subdirectory structure is already present
+wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+path_in <- file.path(wd, "processing_data", "04_biomet_qc", "output")
+
+# Input file - biomet output with QC flags
+biomet_input <- latest_version(path_in, "biomet_qc")
+# Input file - biomet data from nearby sites
+aux_input <- latest_version(
+  stringr::str_replace(path_in, settings$site, md$closest_site[1]), 
+  "biomet_qc"
+)
+# Input file - processed ERA data for site location
+era_input <- latest_version(
+  file.path("~/Desktop", "DATA", "Flux", "JLL", "all", "output"), "era_proc"
+)
+
+# Set tag for creating output file names
+tag_out <- create_tag(settings$site, settings$year, settings$date)
+
+# Set path for output files
+path_out <- file.path(wd, "processing_data", "05_biomet_gapfill", "output")
 
 
 ### Perform Biomet data initialization =========================================
