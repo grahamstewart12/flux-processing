@@ -54,16 +54,18 @@ apply_offset <- function(x, offset) {
   out
 }
 
-sun_time <- function(sol_ang) {
+sun_time <- function(sol_ang, shoulder_n) {
   
   dplyr::case_when(
     magrittr::and(
       sol_ang > 0,
-      lag(sol_ang, 1) < 0 | lag(sol_ang, 2) < 0 | lag(sol_ang, 3) < 0
+      before(sol_ang, ~ .x < 0, .n = shoulder_n)
+      #lag(sol_ang, 1) < 0 | lag(sol_ang, 2) < 0 | lag(sol_ang, 3) < 0
     ) ~ "rise",
     magrittr::and(
       sol_ang < 0,
-      lag(sol_ang, 1) > 0 | lag(sol_ang, 2) > 0 | lag(sol_ang, 3) > 0
+      before(sol_ang, ~ .x > 0, .n = shoulder_n)
+      #lag(sol_ang, 1) > 0 | lag(sol_ang, 2) > 0 | lag(sol_ang, 3) > 0
     ) ~ "set",
     sol_ang > 0 ~ "day",
     sol_ang < 0 ~ "night"
@@ -206,14 +208,14 @@ offset <- biomet %>%
     sw_in_pot = potential_radiation(timestamp, md),
     sol_ang = sun_position(timestamp, md),
     # Stricter sun time to exclude any possible period with light
-    sun_time = sun_time(sol_ang, max_lag = 3)
+    sun_time = sun_time(sol_ang, shoulder_n = 3)
   ) %>%
   filter(sw_in_pot == 0, sun_time == "night") %>%
   summarize_at(vars(ppfd_in, sw_in, sw_out), mean, na.rm = TRUE) %>%
   as.list()
 
 # Check offsets
-offset %>% enframe(value = "offset") %>% unnest(offset)
+#offset %>% enframe(value = "offset") %>% unnest(offset)
 
 biomet <- mutate(
   biomet, 
@@ -233,7 +235,7 @@ frac_ppfd <- biomet %>%
   drop_na() %>% 
   summarize(sum(sw_in) / sum(ppfd_in)) %>% 
   pluck(1)
-frac_ppfd
+#frac_ppfd
 
 biomet <- mutate(
   biomet,
@@ -246,7 +248,7 @@ biomet <- mutate(
   night_pot = sw_in_pot < 20,
   # Solar angle and sun position
   sol_ang = sun_position(timestamp - 900, md),
-  sun_time = sun_time(sol_ang, max_lag = 1),
+  sun_time = sun_time(sol_ang, shoulder_n = 1),
   # Clearness index
   kt = clearness_index(sw_in, sw_in_pot, night_pot)
 )
