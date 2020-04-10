@@ -25,8 +25,13 @@ source("~/Desktop/DATA/Flux/tools/reference/gf_control.R")
 ### Helper functions ===========================================================
 
 acf_1 <- function(x) {
+  
   acf <- acf(x, plot = FALSE, na.action = na.pass)$acf
-  acf %>% array_branch() %>% flatten_dbl() %>% pluck(2)
+  
+  acf %>% 
+    purrr::array_branch() %>% 
+    purrr::flatten_dbl() %>% 
+    purrr::pluck(2)
 }
 
 get_best_lag <- function(y, x, lag.max = 12) {
@@ -98,13 +103,13 @@ roll_mean_real <- function(x, n = 1L) {
   dplyr::coalesce(m, x)
 }
 
-plot_harmonies <- function(data, data_aux, aux_suffix) {
+plot_harmonies <- function(data, aux_data, aux_suffix) {
   
   sfx <- aux_suffix
   sfx_ <- stringr::str_c("_", sfx)
   
-  data_aux %>%
-    dplyr::rename_at(vars(-timestamp), ~stringr::str_c(., sfx_)) %>%
+  aux_data %>%
+    dplyr::rename_at(vars(-timestamp), ~ stringr::str_c(., sfx_)) %>%
     dplyr::left_join(data, by = "timestamp") %>%
     tidyr::pivot_longer(-timestamp, names_to = "var", values_to = "value") %>%
     dplyr::mutate(
