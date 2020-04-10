@@ -468,12 +468,9 @@ biomet <- biomet %>%
 
 # Load Biomet file from closest site
 biomet_aux <- read.csv(aux_input, stringsAsFactors = FALSE)
+# Parse timestamp
 biomet_aux <- mutate(
-  biomet_aux, 
-  # Parse timestamp
-  timestamp = ymd_hms(timestamp, tz = md$tz_name),
-  # Remove records during system failure
-  p_rain = clean(p_rain, flag_biomet_system(biomet_aux))
+  biomet_aux, timestamp = ymd_hms(timestamp, tz = md$tz_name)
 )
 
 # Initialize QC data frame
