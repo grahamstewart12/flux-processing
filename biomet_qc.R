@@ -23,7 +23,7 @@
 # Output(s):
 
 # Load the required packages
-devtools::load_all("~/Desktop/RESEARCH/fluxtools", quiet = TRUE)
+suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(openeddy)
 library(lubridate)
 library(tidyverse)
@@ -178,7 +178,7 @@ biomet_auto_flags <- function(data, var, p_rain) {
     dplyr::select(range, delta, step)
   
   # Cross-check SWC & TS step flags against P_RAIN
-  # - large jumps are reasonable if it rained
+  # - large jumps are reasonable if it rained (+/- 1 lag)
   if (var_name %in% c("swc", "ts")) {
     pd <- pd %>%
       dplyr::bind_cols(tbl) %>%
@@ -242,8 +242,8 @@ biomet_auto_flags <- function(data, var, p_rain) {
     ) %>%
     dplyr::select(sigma = v_flag, spike = k_flag)
   
-  # Cross-check SWC & TS step flags against P_RAIN
-  # - large jumps are reasonable if it rained
+  # Cross-check SWC & TS sigma, spike flags against P_RAIN
+  # - large jumps are reasonable if it rained that day
   if (var_name %in% c("swc", "ts")) {
     dm <- dm %>%
       dplyr::bind_cols(dplyr::select(tbl, date, p)) %>%
@@ -527,7 +527,7 @@ for (i in seq_along(vars)) {
 
 ### Flag theoretically implausible values ======================================
 
-cat("Flagging unlikely conditions...")
+cat("\nFlagging unlikely conditions...")
 
 # Add p_rain to vars list
 all_vars <- append(vars, list(expr(p_rain)))
@@ -573,9 +573,9 @@ qc_biomet <- mutate(
   qc_p_rain_rh = if_else(biomet$p_rain > 0 & biomet$rh < p_rain_rh_lim, 1L, 0L),
   qc_p_rain_kt = if_else(biomet$p_rain > 0 & biomet$kt > p_rain_kt_lim, 1L, 0L),
   qc_p_rain_lik = combine_flags(qc_p_rain_rh, qc_p_rain_kt),
-  # Did nearby site experience similar conditions? (+/- 1 lag)  
+  # Did nearby site experience similar conditions? (+/- 2 lags)  
   qc_p_rain_aux = if_else(magrittr::and(
-    biomet$p_rain > 0, around(biomet_aux$p_rain, ~ .x == 0, .and = TRUE)
+    biomet$p_rain > 0, around(biomet_aux$p_rain, ~ .x == 0, .n = 2, .and = TRUE)
   ), 1L, 0L),
   # Hard flag if unlikely precipitation AND closest site had no rain
   qc_p_rain_err = if_else(qc_p_rain_lik + qc_p_rain_aux > 1, 2L, 0L) %>%
