@@ -16,7 +16,7 @@ library(lubridate)
 library(tidyverse)
 # Packages needed but not loaded: solartime, bigleaf, broom
 
-source("~/Desktop/DATA/Flux/tools/engine/biomet_gapfill.R")
+#source("~/Desktop/DATA/Flux/tools/engine/biomet_gapfill.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 source("~/Desktop/DATA/Flux/tools/reference/var_attributes.R")
 source("~/Desktop/DATA/Flux/tools/reference/gf_control.R")
@@ -646,6 +646,7 @@ aux <- mutate(
 )
 
 cat("De-biasing auxilliary data.\n")
+
 # Set primary var if options are available (ta, vpd)
 aux_vars <- list_modify(aux_vars, ta = md$ta_var)
 
@@ -664,13 +665,9 @@ aux_c <- aux %>% select_clean(aux_vars) %>% as_tibble()
 
 # Check harmonization
 plots$aux_vars <- plot_harmonies(biomet_c, aux_c, "aux")
-#plots$aux_vars
 
 # Fit biomet and aux variables to generate de-biasing coefficients
 aux_fits <- map(aux_vars, ~ debias_init(biomet_c, aux_c, ., ctrl = aux_ctrl))
-
-# Check de-biasing coefficients
-#map(aux_fits, pluck, "coefficients") %>% enframe() %>% unnest_wider(value)
 
 # De-bias the auxilliary data
 aux_d <- aux_vars %>% 
@@ -683,9 +680,9 @@ aux_d <- aux_vars %>%
 
 # Check results
 plots$aux_debias <- plot_fill_vars(aux_d, "aux_d")
-#plots$aux_debias
 
 cat("Writing de-biased auxilliary data.\n")
+
 # Save de-biased auxilliary data with documentation
 aux_d_out <- file.path(path_out, paste0("biomet_aux_db_", tag_out, ".csv"))
 write.csv(aux_d, aux_d_out, row.names = FALSE)
@@ -709,32 +706,29 @@ sink()
 ### Data from external sources =================================================
 
 cat("Importing ERA file.\n")
+
 # ERA
 era <- read.csv(era_input, stringsAsFactors = FALSE)
 era <- mutate(era, timestamp = ymd_hms(timestamp, tz = "UTC"))
 
 cat("Harmonizing ERA data.\n")
+
 # Prepare to be used for gap-filling
 era_c <- era %>%
   as_tibble() %>%
   # Note: ts0 = skin, ts1 = 0-7cm, ts2 = 7-28cm, ts3 = 28-100cm
   select(
     timestamp, ta, pa_ep, sw_in, sw_out, lw_in, lw_out, vpd, p_rain, 
-    swc1, swc2, swc3, ts0, ts1, ts2, ts3
+    swc1, swc2, swc3, ts1, ts2, ts3
   ) %>%
-  mutate(
-    # Estimate g at different levels 
-    g1 = ts0 - ts2, g2 = ts1 - ts2, g3 = ts2 - ts3,
-    # Match appropriate TA vars 
-    !!sym(md$ta_var) := ta
-  ) %>%
-  # Update g using swc as proxy for wtd
-  mutate_at(vars(g1, g2, g3), ~ . * scales::rescale(1 - swc3)) %>%
+  # Match appropriate TA vars 
+  mutate(!!sym(md$ta_var) := ta) %>%
   # Adjust swc for offset when wetland is likely inundated
-  mutate_at(
-    vars(swc2, swc3), flatten_period, 
-    n = pluck(md, "drydown_start", as.character(settings$year)) * 24
-  ) %>%
+  # - no! too complicated!!
+  #mutate_at(
+  #  vars(swc2, swc3), flatten_period, 
+  #  n = pluck(md, "drydown_start", as.character(settings$year)) * 24
+  #) %>%
   # Subset current year
   right_join(select(biomet, timestamp), by = "timestamp") %>% 
   drop_na()
@@ -746,7 +740,7 @@ biomet_h <- era_c %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (doesn't exist in ERA)
   mutate(
-    g = roll_mean_real(g, 3), swc = roll_mean_real(swc, 7), 
+    swc = roll_mean_real(swc, 7), 
     ts = roll_mean_real(ts, 11)
   ) %>%
   # p_rain is a sum, so need to add half-hours before joining
@@ -761,12 +755,10 @@ biomet_h <- era_c %>%
 
 # Combine ERA soil var levels to account for changing WTD throughout year
 era_c <- era_c %>%
-  bind_cols(select(biomet_h, g, swc, ts)) %>%
-  mutate_at(vars(g1, g2, g3), ~ apply_lag(., get_best_lag(g, .))) %>%
+  bind_cols(select(biomet_h, swc, ts)) %>%
   mutate_at(vars(swc1, swc2, swc3), ~ apply_lag(., get_best_lag(swc, .))) %>%
   mutate_at(vars(ts1, ts2, ts3), ~ apply_lag(., get_best_lag(ts, .))) %>%
   mutate(
-    g = blend_vars(biomet_h, ., g, g1, g2, g3, diff = TRUE),
     swc = blend_vars(biomet_h, ., swc, swc2, swc3),
     ts = blend_vars(biomet_h, ., ts, ts2, ts3)
 )
@@ -775,11 +767,9 @@ era_c <- era_c %>%
 era_vars <- list_modify(era_vars, ta = md$ta_var)
 era_ctrl <- list_modify(
   control,
-  g = list(db_lag = get_best_lag(biomet_h$g, era_c$g)),
   swc = list(db_lag = get_best_lag(biomet_h$swc, era_c$swc)),
   ts = list(db_lag = get_best_lag(biomet_h$ts, era_c$ts))
 )
-#map_dbl(era_ctrl, pluck, "db_lag") # check lags
 
 # Harmonize cleaned biomet
 biomet_hc <- era_c %>%
@@ -788,7 +778,7 @@ biomet_hc <- era_c %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (not the case in ERA)
   mutate(
-    g = roll_mean_real(g, 3), swc = roll_mean_real(swc, 7),  
+    swc = roll_mean_real(swc, 7),  
     ts = roll_mean_real(ts, 11)
   ) %>%
   # p_rain is a sum, so need to add half-hours before joining
@@ -806,11 +796,10 @@ biomet_hc <- era_c %>%
     by = "timestamp"
   )
 
-# Check harmonization
+# Plot harmonization
 plots$era_vars <- biomet_hc %>% 
   select(-ppfd_in, -sol_ang_h) %>% 
   plot_harmonies(era_c, "era")
-#plots$era_vars
 
 # Calculate average distribution (in half-hrs) of hourly p_rain
 # - needed to re-distribute p_rain when re-constructing original time series
@@ -825,6 +814,7 @@ p_rain_dist <- biomet_c %>%
   pull()
 
 cat("De-biasing ERA data.\n")
+
 # Fit biomet and aux variables to generate de-biasing coefficients
 era_fits <- map(era_vars, ~ debias_init(biomet_hc, era_c, ., ctrl = era_ctrl))
 
@@ -838,9 +828,8 @@ era_d <- era_vars %>%
   as_tibble() %>%
   bind_cols(select(biomet_hc, timestamp), .)
 
-# Check results
+# Plot results
 plots$era_debias <- plot_fill_vars(era_d, "era_d")
-#plots$era_debias
 
 # Get coefficient of ppfd_in/sw_in relationship
 frac_ppfd_era <- biomet_hc %>% 
@@ -879,16 +868,13 @@ era_df <- era_d %>%
     ppfd_in = sw_in / frac_ppfd_era
   ) %>%
   select_at(vars(-contains("sol_ang"))) %>%
-  rename_at(vars(-timestamp), ~str_c(., "_df"))
+  rename_at(vars(-timestamp), ~ str_c(., "_df"))
 
-# Check results
+# Plot results
 plots$era_reconst <- era_df %>% select(-ppfd_in_df) %>% plot_fill_vars("era_df")
-#plots$era_reconst
-
-# Check the final dataset
-#era_df %>% summarize(first(timestamp), last(timestamp)) # start/end?
 
 cat("Writing de-biased ERA data.\n")
+
 # Save de-biased external data with documentation
 era_df_out <- file.path(path_out, paste0("era_db_reconst", tag_out, ".csv"))
 write.csv(era_df, era_df_out, row.names = FALSE)
@@ -918,6 +904,7 @@ sink()
 gf_vars <- list_modify(gf_vars, ta = md$ta_var)
 
 cat("Generating filled data with MDC algorithm.\n")
+
 # Gather vars that will run MDC
 mdc_names <- gf_vars %>% 
   enframe(value = "var") %>% 
@@ -943,6 +930,7 @@ for (i in seq_along(mdc_names)) {
 mdc_results <- biomet_mdc$sExportResults() %>% as_tibble()
 
 cat("Gathering all fill variables.\n")
+
 # Initialize gap-filling data frame
 ta_alt <- pluck(control, md$ta_var, "gf_backup")
 biomet_f <- biomet_c %>%
@@ -972,6 +960,7 @@ fill_data <- gf_vars %>%
   set_names(gf_vars)
 
 cat("Customizing gap filling based on available data.\n")
+
 # Create reference vector indicating which gapfill variable to use
 gf_meths <- imap(fill_data, ~ plan_fill(.x, ctrl = era_ctrl, var = .y))
 
@@ -985,6 +974,7 @@ gf_qcs <- gf_meths %>%
   ))
 
 cat("Filling gaps.\n")
+
 # Coalesce gapfill vars into one final vector
 filled_vars <- map2(fill_data, gf_meths, gapfill_biomet)
 
@@ -1000,6 +990,7 @@ biomet <- bind_cols(
 )
 
 cat("Cleaning up results.\n")
+
 # Set nighttime shortwave radiation to 0 and recode fmeth/fqc
 # Used only when potential radiation is 0 (i.e. nighttime) AND sun is not
 #   actively rising or setting, OR when var < 0
@@ -1072,18 +1063,19 @@ biomet <- biomet %>%
   )
 
 cat("Plotting results.\n")
+
 # Plot results
 plots$gf_results <- biomet %>% 
   select_at(vars(timestamp, ends_with("_f"))) %>% 
   plot_fill_vars("var_f")
 
 plots_fmeth <- gf_vars %>% 
-  map(~plot_filled(biomet, ., "fmeth")) %>% 
+  map(~ plot_filled(biomet, ., "fmeth")) %>% 
   set_names(str_c(gf_vars, "_fmeth"))
 plots <- append(plots, plots_fmeth)
 
 plots_fqc <- gf_vars %>% 
-  map(~plot_filled(biomet, ., "fqc")) %>% 
+  map(~ plot_filled(biomet, ., "fqc")) %>% 
   set_names(str_c(gf_vars, "_fqc"))
 plots <- append(plots, plots_fqc)
 
