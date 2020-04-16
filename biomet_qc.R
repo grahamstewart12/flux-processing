@@ -470,18 +470,18 @@ biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
 
 # Add timestamp components
 biomet <- biomet %>% 
-  mutate(timestamp = ymd_hms(timestamp, tz = md$tz_name)) %>%
+  dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
   add_time_comps()
 
 # Load Biomet file from closest site
 biomet_aux <- read.csv(aux_input, stringsAsFactors = FALSE)
 # Parse timestamp
-biomet_aux <- mutate(
-  biomet_aux, timestamp = ymd_hms(timestamp, tz = md$tz_name)
+biomet_aux <- dplyr::mutate(
+  biomet_aux, timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
 )
 
 # Initialize QC data frame
-qc_biomet <- select(biomet, timestamp)
+qc_biomet <- dplyr::select(biomet, timestamp)
 
 # Warn if both ta or rh vars are the same
 #biomet %>% filter(ta == ta_ep) %>% summarize(n())
@@ -496,31 +496,31 @@ cat("Computing automatic sensor flags.\n")
 
 # Compute all auto flags
 auto_flags <- vars %>% 
-  map(~ biomet_auto_flags(biomet, !!., p_rain)) %>%
-  set_names(map_chr(vars, rlang::as_string))
+  purrr::map(~ biomet_auto_flags(biomet, !!., p_rain)) %>%
+  rlang::set_names(purrr::map_chr(vars, rlang::as_string))
 
 # Validate flags for analagous sensors
 # - can do this for sw_in vs sw_out because same unit NOT same sensor
 auto_flags <- auto_flags %>%
-  list_modify(sw_in2 = pluck(auto_flags, "sw_in")) %>%
+  purrr::list_modify(sw_in2 = purrr::pluck(auto_flags, "sw_in")) %>%
   validate_flags(ta, ta_ep) %>%
   validate_flags(ppfd_in, sw_in) %>%
   validate_flags(sw_out, sw_in2) %>%
-  list_modify(sw_in2 = NULL)
+  purrr::list_modify(sw_in2 = NULL)
 
 # Give flags QC names
 for (i in seq_along(vars)) {
-  auto_flags[[i]] <- rename_all(
-    auto_flags[[i]], ~ str_c("qc_", names(auto_flags)[i], "_", .)
+  auto_flags[[i]] <- dplyr::rename_all(
+    auto_flags[[i]], ~ stringr::str_c("qc_", names(auto_flags)[i], "_", .)
   )
 }
 
 # Plot all flags for each var
-auto_plots <- map2(vars, auto_flags, ~ plot_flags(biomet, !!.x, .y))
+auto_plots <- purrr::map2(vars, auto_flags, ~ plot_flags(biomet, !!.x, .y))
 
 # Add combined flag to QC dataset
 for (i in seq_along(vars)) {
-  var_qc_name <- str_c("qc_", rlang::as_string(vars[[i]]), "_auto")
+  var_qc_name <- stringr::str_c("qc_", rlang::as_string(vars[[i]]), "_auto")
   qc_biomet[, var_qc_name] <- combine_flags(auto_flags[[i]], clean_value = 1)
 }
 
@@ -533,10 +533,12 @@ cat("\nFlagging unlikely conditions...")
 all_vars <- append(vars, list(expr(p_rain)))
 
 for (i in seq_along(all_vars)) {
-  var_qc_name <- str_c("qc_", rlang::as_string(all_vars[[i]]), "_plaus")
+  var_qc_name <- stringr::str_c(
+    "qc_", rlang::as_string(all_vars[[i]]), "_plaus"
+  )
   qc_biomet[, var_qc_name] <- drop_attributes(apply_thr(
-    pull(biomet, !!all_vars[[i]]),
-    pluck(var_attrs, rlang::as_string(all_vars[[i]]), "limits"),
+    dplyr::pull(biomet, !!all_vars[[i]]),
+    purrr::pluck(var_attrs, rlang::as_string(all_vars[[i]]), "limits"),
     flag = "outside"
   ))
 }
@@ -564,7 +566,7 @@ p_rain_kt_lim <- biomet %>%
   summarize(mean(kt) + 2 * sd(kt)) %>%
   pluck(1, 1) %>% signif(1)
 
-qc_biomet <- mutate(
+qc_biomet <- dplyr::mutate(
   qc_biomet,
   # Unlikely precipitation - soft flags
   # - non-rain events are not flagged because no plausible explanation for that
@@ -579,7 +581,7 @@ qc_biomet <- mutate(
   ), 1L, 0L),
   # Hard flag if unlikely precipitation AND closest site had no rain
   qc_p_rain_err = if_else(qc_p_rain_lik + qc_p_rain_aux > 1, 2L, 0L) %>%
-    replace_na(0L)
+    tidyr::replace_na(0L)
 )
 
 cat("done.\n")
@@ -588,12 +590,15 @@ cat("done.\n")
 ### Difference between analagous measurement flags =============================
 
 # TA, RH, SW_IN
-qc_biomet <- bind_cols(
+qc_biomet <- dplyr::bind_cols(
   qc_biomet,
   flag_var_diffs(biomet, ta, ta_ep, qc_biomet),
   # Only consider daytime differences for incoming rad
   flag_var_diffs(
-    mutate_at(biomet, vars(sw_in, ppfd_in), ~ if_else(night_pot, NA_real_, .)), 
+    dplyr::mutate_at(
+      biomet, dplyr::vars(sw_in, ppfd_in), 
+      ~ dplyr::if_else(night_pot, NA_real_, .)
+    ), 
     sw_in, ppfd_in, qc_biomet
   )
 )
@@ -606,9 +611,11 @@ cat("Combining flags and plotting results...")
 for (i in seq_along(all_vars)) {
   var_name <- rlang::as_string(all_vars[[i]])
   var_flags <- qc_biomet %>% 
-    select_at(vars(contains(str_c("_", var_name, "_")))) %>%
-    mutate_all(~ if_else(. == 1, 0L, .))
-  if (!str_detect(var_name, "_ep")) {
+    dplyr::select_at(
+      dplyr::vars(dplyr::contains(stringr::str_c("_", var_name, "_")))
+    ) %>%
+    dplyr::mutate_all(~ dplyr::if_else(. == 1, 0L, .))
+  if (!stringr::str_detect(var_name, "_ep")) {
     var_flags <- select_at(var_flags, vars(-contains("_ep_")))
   }
   
@@ -618,21 +625,27 @@ for (i in seq_along(all_vars)) {
 
 # Plot of all flags for each var
 flag_plots <- all_vars %>%
-  map(~ plot_flags(biomet, !!., qc_biomet, geom = "line")) %>%
-  set_names(str_c(map_chr(all_vars, rlang::as_label), "_flags"))
+  purrr::map(~ plot_flags(biomet, !!., qc_biomet, geom = "line")) %>%
+  rlang::set_names(
+    stringr::str_c(purrr::map_chr(all_vars, rlang::as_label), "_flags")
+  )
 
 # How many flagged?
 biomet %>%
-  select_at(vars(all_of(str_c("qc_", map_chr(all_vars, rlang::as_string))))) %>%
-  pivot_longer(everything()) %>%
-  group_by(name) %>%
-  filter(value == 2) %>%
-  summarize(n_flag = n())
+  dplyr::select_at(dplyr::vars(all_of(
+    stringr::str_c("qc_", purrr::map_chr(all_vars, rlang::as_string))
+  ))) %>%
+  tidyr::pivot_longer(dplyr::everything()) %>%
+  dplyr::group_by(name) %>%
+  dplyr::filter(value == 2) %>%
+  dplyr::summarize(n_flag = dplyr::n())
 
 # Plot overall flag for each var
 qc_plots <- all_vars %>%
-  map(~ plot_flags(biomet, !!., geom = "line")) %>%
-  set_names(str_c(map_chr(all_vars, rlang::as_label), "_qc"))
+  purrr::map(~ plot_flags(biomet, !!., geom = "line")) %>%
+  rlang::set_names(
+    stringr::str_c(purrr::map_chr(all_vars, rlang::as_label), "_qc")
+  )
 
 # Combine all plot lists
 plots <- append(flag_plots, qc_plots)
@@ -644,7 +657,7 @@ cat("done.\n")
 cat("Writing output...")
 
 # Save processed Biomet dataset
-biomet_out <- file.path(path_out, str_c("biomet_qc_", tag_out, ".csv"))
+biomet_out <- file.path(path_out, stringr::str_c("biomet_qc_", tag_out, ".csv"))
 write.csv(biomet, biomet_out, row.names = FALSE)
 
 # Create documentation for processed Biomet output
@@ -653,26 +666,26 @@ biomet_docu <- append(
   list(
     files = c(biomet_input, aux_input),
     aux_site = md$closest_site[1],
-    plaus_lims = modify(var_attrs, "limits"),
+    plaus_lims = purrr::modify(var_attrs, "limits"),
     p_rain_lik = list(kt_lim = p_rain_kt_lim, rh_lim = p_rain_rh_lim)
   )
 )
-biomet_docu_out <- str_replace(biomet_out, ".csv", ".txt")
+biomet_docu_out <- stringr::str_replace(biomet_out, ".csv", ".txt")
 # Save documentation
 sink(biomet_docu_out)
 biomet_docu
 sink()
 
 # Save Biomet QC flags datasets
-auto_biomet_out <- str_replace(biomet_out, "_qc_", "_qc_auto_flags_")
-write.csv(bind_cols(auto_flags), auto_biomet_out, row.names = FALSE)
-qc_biomet_out <- str_replace(biomet_out, "_qc_", "_qc_flags_")
+auto_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_auto_flags_")
+write.csv(dplyr::bind_cols(auto_flags), auto_biomet_out, row.names = FALSE)
+qc_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_flags_")
 write.csv(qc_biomet, qc_biomet_out, row.names = FALSE)
 
 # Save one pdf document with all diagnostic/summary plots
 plot_path <- file.path(path_out, paste0("biomet_qc_plots_", tag_out, ".pdf"))
 pdf(plot_path)
-map(plots, ~ .)
+purrr::map(plots, ~ .)
 dev.off()
 
 cat("done.\n")
