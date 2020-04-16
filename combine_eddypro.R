@@ -10,14 +10,15 @@
 
 # Inputs:
 
+start_time <- Sys.time()
+
 # Load the required packages
-devtools::load_all("~/Desktop/RESEARCH/fluxtools")
-library(openeddy)
-library(lubridate)
-library(tidyverse)
+suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
+library(openeddy, warn.conflicts = FALSE)
+library(lubridate, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
 
 # Load the source files
-#source("~/Desktop/DATA/Flux/tools/engine/combine_eddypro.R")
 source("~/Desktop/DATA/Flux/tools/reference/combine_eddypro_control.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
@@ -73,119 +74,152 @@ lists <- 1:6 %>%
 
 data_files <- vector("list", length = length(ep_paths))
 
+read_eddypro <- function(file, timestamp = paste(date, time), ...) {
+  
+  timestamp <- rlang::enexpr(timestamp)
+  
+  # Default: skip = 0, units = TRUE
+  data <- openeddy::read_eddy(file, ...)
+  
+  data %>%
+    tibble::as_tibble(.name_repair = "unique") %>%
+    dplyr::mutate_if(is.factor, as.character) %>%
+    dplyr::mutate(timestamp = lubridate::ymd_hm(!!timestamp)) %>%
+    dplyr::filter(!is.na(timestamp))
+}
+
 # Read files into the lists
 for (i in seq_along(ep_paths)) {
+  
   cat("Reading files from folder ", basename(ep_paths[i]), ": ", sep = "")
+  
   data_files[[i]] <- ep_paths[i] %>%
     list.files(pattern = ".csv", full.names = TRUE, recursive = TRUE) %>% 
     str_subset_eddypro()
   files <- data_files[[i]]
   files_col <- stringr::str_c(files, collapse = "|")
+  
   # FULL OUTPUT FILE
   if (stringr::str_detect(files_col, "full_output")) {
     cat("full_output...")
     file <- stringr::str_subset(files, "full_output")
-    lists[["full_output"]][[i]] <- openeddy::read_eddy(file, skip = 1) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(paste(date, time))) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file, skip = 1)
+    purrr::pluck(lists, "full_output", i) <- temp
     cat("done. ")
   } 
+  
   # METADATA FILE
   if (stringr::str_detect(files_col, "metadata")) {
     cat("metadata...")
     file <- stringr::str_subset(files, "metadata")
-    lists[["metadata"]][[i]] <- openeddy::read_eddy(file, units = FALSE) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(paste(date, time))) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file, units = FALSE)
+    purrr::pluck(lists, "metadata", i) <- temp
     cat("done. ")
   }
+  
   # BIOMET FILE
   if (stringr::str_detect(files_col, "biomet")) {
     cat("biomet...")
     file <- stringr::str_subset(files, "biomet")
-    lists[["biomet"]][[i]] <- openeddy::read_eddy(file) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(paste(date, time))) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file)
+    purrr::pluck(lists, "biomet", i) <- temp
     cat("done. ")
   }
+  
   # FLUXNET FILE
   if (stringr::str_detect(files_col, "fluxnet")) {
     cat("fluxnet...")
     file <- stringr::str_subset(files, "fluxnet")
-    lists[["fluxnet"]][[i]] <- file %>% 
-      openeddy::read_eddy(units = FALSE) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(TIMESTAMP_END)) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file, TIMESTAMP_END, units = FALSE)
+    purrr::pluck(lists, "fluxnet", i) <- temp
     cat("done. ")
   }
+  
   # QC DETAILS FILE
   if (stringr::str_detect(files_col, "qc_details")) {
     cat("qc_details...")
     file <- stringr::str_subset(files, "qc_details")
-    lists[["qc_details"]][[i]] <- file %>%
-      openeddy::read_eddy(skip = 1) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(paste(date, time))) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file, skip = 1)
+    purrr::pluck(lists, "qc_details", i) <- temp
     cat("done. ")
   }
+  
   # STATS FILE
   if (stringr::str_detect(files_col, "st7")) {
     cat("stats...")
     file <- stringr::str_subset(files, "st7")
-    lists[["st7"]][[i]] <- file %>%
-      openeddy::read_eddy(skip = 1, units = FALSE) %>%
-      tibble::as_tibble(.name_repair = "unique") %>%
-      dplyr::mutate_if(is.factor, as.character) %>%
-      dplyr::mutate(timestamp = lubridate::ymd_hm(paste(date, time))) %>%
-      dplyr::filter(!is.na(timestamp))
+    temp <- read_eddypro(file, skip = 1, units = FALSE)
+    purrr::pluck(lists, "st7", i) <- temp
     cat("done. ")
   }
+  
   cat("\n")
 }
 
-#ep_path_nms <- basename(ep_paths)
-
-lists <- lists %>%
+lists_sub <- lists %>%
   purrr::map(rlang::set_names, basename(ep_paths)) %>%
   purrr::map(purrr::discard, is.null)
-#lists <- read_eddypro_files(ep_paths)
 
-# Subset data based on correct calibrations
-# - I HATE this but it works
-dir_start <- purrr::pluck(control, settings$site, settings$year, "dir_start")
-dir_end <- purrr::pluck(control, settings$site, settings$year, "dir_end")
-lists <- lists %>%
-  purrr::map(
-    purrr::map_at, ep_dirs[1], dplyr::filter, 
-    !dplyr::between(
-      timestamp, 
-      lubridate::as_datetime(dir_start[1]), lubridate::as_datetime(dir_start[2])
-    )
-  ) %>%
-  purrr::map(
-    purrr::map_at, ep_dirs[2], dplyr::filter, 
-    dplyr::between(
-      timestamp, 
-      lubridate::as_datetime(dir_start[1]), lubridate::as_datetime(dir_start[2])
-    )
+# Subset data based on correct calibrations if applicable
+recal <- purrr::pluck(control, settings$site, settings$year, "recal_periods")
+
+if (!all(is.na(recal))) {
+  
+  cat("Removing uncalibrated periods...")
+  
+  # Recal dir should be labeled with "_recal"
+  # - only supports one recal dir (for now)
+  recal_dir <- stringr::str_subset(ep_dirs, "recal")
+  
+  # Pull timestamp from first recal file (should be same for all)
+  recal_timestamp <- purrr::pluck(lists_sub, 1, recal_dir, "timestamp")
+  
+  # Generate timestamp subset key 
+  recal_subset <- recal %>%
+    # Get indices of timestamps included in each period
+    purrr::map(
+      ~ which(dplyr::between(
+        recal_timestamp, 
+        lubridate::as_datetime(.[1]), lubridate::as_datetime(.[2])
+      ))
+    ) %>%
+    # Take union of all periods
+    purrr::reduce(union)
+  
+  # Subset the data
+  lists_sub <- purrr::map(
+    lists_sub, purrr::map_at, recal_dir, dplyr::slice, recal_subset
   )
+  
+  # Remove recal periods from non-recal data
+  
+  # Pull updated timestamp from recal data
+  recal_timestamp2 <- purrr::pluck(lists_sub, 1, recal_dir, "timestamp")
+  
+  # Get non-recal dirs
+  other_dirs <- stringr::str_subset(ep_dirs, "recal", negate = TRUE)
+  
+  # Subset the data
+  lists_sub <- purrr::map(
+    lists_sub, purrr::map_at, other_dirs, 
+    dplyr::filter, !timestamp %in% recal_timestamp2
+  )
+  
+  # Another way to do this:
+  # 1. mutate(recal = if_else(recal, 1, 2))
+  # 2. combine
+  # 3. group_by(timestamp)
+  # 4. arrange(recal)
+  # 5. slice(1)
+}
+
+cat("done.\n")
+cat("Coalescing data...")
 
 # Combine and save the data as .csv files
 
-cat("Coalescing data.\n")
-
 # Save original varnames and units
-varnames <- lists %>%
+varnames <- lists_sub %>%
   purrr::map_depth(2, dplyr::select, -timestamp) %>%
   purrr::map_depth(2, ~ openeddy::varnames(., names = TRUE)) %>%
   purrr::map_depth(2, dplyr::bind_rows) %>%
@@ -196,7 +230,7 @@ varnames <- lists %>%
   purrr::map(~ dplyr::coalesce(., names(.))) %>%
   purrr::map(tidyr::replace_na, "-") %>%
   purrr::map(unname)
-units <- lists %>%
+units <- lists_sub %>%
   purrr::map_depth(2, dplyr::select, -timestamp) %>%
   purrr::map_depth(2, ~ openeddy::units(., names = TRUE)) %>%
   purrr::map_depth(2, dplyr::bind_rows) %>%
@@ -205,24 +239,55 @@ units <- lists %>%
   purrr::map(unlist, use.names = FALSE)
 
 # Combine the data
-combined_lists <- lists %>%
+combined_lists <- lists_sub %>%
   purrr::map(dplyr::bind_rows) %>%
   purrr::map(dplyr::arrange, timestamp) %>%
   # Subset year
   purrr::map(
     dplyr::filter, lubridate::year(timestamp - 900) %in% settings$year
-  ) %>%
+  ) 
+
+cat("done.\n")
+cat("Resolving duplicate timestamps: ")
+
+# Handle duplicated observations
+for (i in seq_along(combined_lists)) {
+  
+  name <- names(combined_lists)[i]
+  cat(name, "...", sep = "")
+  
+  combined_lists[[i]] <- combined_lists[[i]] %>% 
+    dplyr::rowwise() %>% 
+    # Number of NA values in each row
+    dplyr::mutate(n_na = sum(is.na(dplyr::c_across(is.numeric)))) %>% 
+    dplyr::group_by(timestamp) %>%
+    # Sort by least number of NAs per timestamp
+    dplyr::arrange(n_na, .by_group = TRUE) %>%
+    # Select the first (i.e. most complete) observation
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(-n_na)
+  
+  cat("done. ")
+}
+
+# Add units and varnames back to data
+combined_lists <- combined_lists %>%
   purrr::map(dplyr::select, -timestamp) %>%
   purrr::map2(varnames, ~ add_attr(.x, "varnames", .y)) %>%
   purrr::map2(units, ~ add_attr(.x, "units", .y))
 
-cat("Writing datasets: ")
+# Write combined data as single .csv files
+
+cat("\nWriting datasets: ")
 
 for (i in seq_along(combined_lists)) {
+  
   name <- names(combined_lists)[i]
   cat(name, "...", sep = "")
   
   if (name %in% c("fluxnet", "st7")) {
+    # FLUXNET and stats outputs don't have units
     write.csv(
       combined_lists[[i]],
       file.path(path_out, paste0(name, "_combined_", tag_out, ".csv")),
@@ -239,17 +304,18 @@ for (i in seq_along(combined_lists)) {
   cat("done. ")
 }
 
-#combined_lists <- combine_eddypro(lists, path_out, tag_out, settings$year)
-
 
 ### Save a comprehensive dataset for further analysis ==========================
 
+cat("\nPreparing FLUXNET data for further analysis...")
+
 # Prepare output dataset
-fluxnet <- lists %>% 
+fluxnet <- combined_lists %>%
   purrr::pluck("fluxnet") %>%
-  dplyr::bind_rows() %>%
+  drop_all_attributes() %>%
+  tibble::as_tibble() %>%
+  dplyr::mutate(timestamp = lubridate::ymd_hm(TIMESTAMP_END)) %>%
   dplyr::select(timestamp, dplyr::everything()) %>%
-  dplyr::arrange(timestamp) %>%
   # Convert all names to lowercase (better for R)
   dplyr::rename_all(tolower) %>%
   # Fix errors caused by duplicated column names
@@ -262,7 +328,9 @@ fluxnet <- data.frame(
   timestamp = create_timesteps(settings$year, 48, shift_by = 30)
 ) %>%
   dplyr::left_join(fluxnet, by = "timestamp")
-#fluxnet %>% summarize(first(timestamp), last(timestamp)) # Start/end?
+
+cat("done.\n")
+cat("Writing FLUXNET data...")
 
 # Save the combined fluxnet files as .csv file
 fn_out <- file.path(path_out, paste0("eddypro_combined_", tag_out, ".csv"))
@@ -282,3 +350,9 @@ sink(fn_docu_out)
 fn_docu
 sink()
 
+end_time <- Sys.time()
+elapsed_time <- round(unclass(end_time - start_time), 3)
+
+cat("done.\n")
+cat("Finished processing in", elapsed_time, attr(elapsed_time, "units"), ".\n")
+cat("Output located in", path_out, "\n")
