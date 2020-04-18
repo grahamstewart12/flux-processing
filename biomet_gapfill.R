@@ -72,7 +72,7 @@ apply_lag <- function(x, lag) {
 select_clean <- function(data, vars) {
   
   vars <- purrr::map_chr(vars, rlang::as_string)
-  df <- dplyr::select_at(data, dplyr::vars(timestamp, dplyr::all_of(vars)))
+  df <- dplyr::select(data, timestamp, dplyr::all_of(vars))
   
   get_qc_var <- function(x) {
     rlang::as_string(x) %>%
@@ -107,7 +107,7 @@ plot_harmonies <- function(data, aux_data, aux_suffix) {
   sfx_ <- stringr::str_c("_", sfx)
   
   aux_data %>%
-    dplyr::rename_at(vars(-timestamp), ~ stringr::str_c(., sfx_)) %>%
+    dplyr::rename_with(~ stringr::str_c(., sfx_), -timestamp) %>%
     dplyr::left_join(data, by = "timestamp") %>%
     tidyr::pivot_longer(-timestamp, names_to = "var", values_to = "value") %>%
     dplyr::mutate(
@@ -293,7 +293,7 @@ blend_vars <- function(data, aux_data, x, var1, var2, var3 = NULL,
           RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
         tot = purrr::pmap_dbl(list(p1, p2), sum)
       ) %>% 
-      dplyr::mutate_at(dplyr::vars(p1, p2), ~ pmax(pmin(. / tot, 1), 0)) %>%
+      dplyr::mutate(dplyr::across(c(p1, p2), ~ pmax(pmin(. / tot, 1), 0))) %>%
       tidyr::unnest(data) %>% 
       # Smooth daily boundaries
       dplyr::transmute(
@@ -305,9 +305,9 @@ blend_vars <- function(data, aux_data, x, var1, var2, var3 = NULL,
     blend <- aux_data %>%
       dplyr::select(timestamp, x1 = !!var1, x2 = !!var2) %>%
       dplyr::left_join(blend, by = "timestamp") %>%
-      dplyr::mutate_at(
-        dplyr::vars(p1, p2), ~ dplyr::if_else(is.nan(.), NA_real_, .)
-      ) %>%
+      dplyr::mutate(dplyr::across(
+        c(p1, p2), ~ dplyr::if_else(is.nan(.), NA_real_, .)
+      )) %>%
       tidyr::fill(p1, p2, .direction = "downup") %>%
       dplyr::mutate(b = x1 * p1 + x2 * p2)
   } else {
@@ -336,7 +336,9 @@ blend_vars <- function(data, aux_data, x, var1, var2, var3 = NULL,
           RcppRoll::roll_mean(7, na.rm = TRUE, fill = NA), 
         tot = purrr::pmap_dbl(list(p1, p2, p3), sum)
       ) %>% 
-      dplyr::mutate_at(dplyr::vars(p1, p2, p3), ~ pmax(pmin(. / tot, 1), 0)) %>%
+      dplyr::mutate(dplyr::across(
+        c(p1, p2, p3), ~ pmax(pmin(. / tot, 1), 0)
+      )) %>%
       tidyr::unnest(data) %>% 
       # Smooth daily boundaries
       dplyr::transmute(
@@ -349,9 +351,9 @@ blend_vars <- function(data, aux_data, x, var1, var2, var3 = NULL,
     blend <- aux_data %>%
       dplyr::select(timestamp, x1 = !!var1, x2 = !!var2, x3 = !!var3) %>%
       dplyr::left_join(blend, by = "timestamp") %>%
-      dplyr::mutate_at(
-        dplyr::vars(p1, p2, p3), ~ dplyr::if_else(is.nan(.), NA_real_, .)
-      ) %>%
+      dplyr::mutate(dplyr::across(
+        c(p1, p2, p3), ~ dplyr::if_else(is.nan(.), NA_real_, .)
+      )) %>%
       tidyr::fill(p1, p2, p3, .direction = "downup") %>%
       dplyr::mutate(b = x1 * p1 + x2 * p2 + x3 * p3)
   }
@@ -472,16 +474,16 @@ plan_fill <- function(list, backup, order, ctrl, var) {
     # Replace non-missing values with the gapfill variable name
     tibble::as_tibble() %>%
     # Make sure fill vars are in the correct order
-    dplyr::select_at(dplyr::vars(tidyselect::all_of(names))) %>%
+    dplyr::select(dplyr::all_of(names)) %>%
     dplyr::mutate(
       gap = dplyr::if_else(is.na(x), 1L, 0L),
       gap_id = dplyr::pull(tidy_rle(gap), id),
       gap_len = dplyr::pull(tidy_rle(gap), lengths)
     ) %>%
     dplyr::group_by(gap_id) %>%
-    dplyr::summarize_at(
-      dplyr::vars(-gap, -dplyr::group_cols()), ~ length(na.omit(.))
-    ) %>%
+    dplyr::summarize(dplyr::across(
+      c(-gap, -dplyr::group_cols()), ~ length(na.omit(.))
+    )) %>%
     dplyr::ungroup()
   
   cover <- gaps %>%
@@ -490,13 +492,13 @@ plan_fill <- function(list, backup, order, ctrl, var) {
       any = purrr::imap_dfr(
         ., ~ dplyr::if_else(.x != 0, .y, NA_character_)
       ) %>% 
-        dplyr::select_at(dplyr::vars(-dplyr::starts_with("gap"))) %>% 
+        dplyr::select(-dplyr::starts_with("gap")) %>% 
         purrr::pmap_chr(dplyr::coalesce), 
       # Do gap-fill vars cover entire gaps?
       all = purrr::imap_dfr(
         ., ~ dplyr::if_else(.x == gap_len, .y, NA_character_)
       ) %>% 
-        dplyr::select_at(dplyr::vars(-dplyr::starts_with("gap"))) %>% 
+        dplyr::select(-dplyr::starts_with("gap")) %>% 
         purrr::pmap_chr(dplyr::coalesce)
     ) %>% 
     dplyr::mutate(
@@ -512,7 +514,7 @@ plan_fill <- function(list, backup, order, ctrl, var) {
     tibble::as_tibble()
   
   # Make sure fill vars are in the correct order
-  inorder <- dplyr::select_at(tbl, dplyr::vars(tidyselect::all_of(names)))
+  inorder <- dplyr::select(tbl, dplyr::all_of(names))
   
   # Coalesce to form "Plan B"
   plan_b <- dplyr::coalesce(!!!as.list(inorder))
@@ -752,8 +754,12 @@ biomet_h <- era_c %>%
 # Combine ERA soil var levels to account for changing WTD throughout year
 era_c <- era_c %>%
   dplyr::bind_cols(dplyr::select(biomet_h, swc, ts)) %>%
-  mutate_at(vars(swc1, swc2, swc3), ~ apply_lag(., get_best_lag(swc, .))) %>%
-  mutate_at(vars(ts1, ts2, ts3), ~ apply_lag(., get_best_lag(ts, .))) %>%
+  dplyr::mutate(dplyr::across(
+    c(swc1, swc2, swc3), ~ apply_lag(., get_best_lag(swc, .))
+  )) %>%
+  dplyr::mutate(dplyr::across(
+    c(ts1, ts2, ts3), ~ apply_lag(., get_best_lag(ts, .))
+  )) %>%
   dplyr::mutate(
     swc = blend_vars(biomet_h, ., swc, swc2, swc3),
     ts = blend_vars(biomet_h, ., ts, ts2, ts3)
@@ -1071,7 +1077,7 @@ biomet <- biomet %>%
     # Albedo
     albedo = sw_out_f / sw_in_f,
     # Water suface temperature
-    tw_surf = (lw_out / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
+    tw_surf = (lw_out_f / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
     # Potential evapotranspiration
     et_pot = dplyr::pull(
       bigleaf::potential.ET(., "ta_ep_f", "pa_ep_f", "netrad_f", "g_f"), ET_pot
