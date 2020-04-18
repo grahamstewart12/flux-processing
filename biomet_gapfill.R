@@ -10,13 +10,11 @@
 
 # Load the required packages
 suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
-library(openeddy)
 library(REddyProc)
 library(lubridate)
 library(tidyverse)
 # Packages needed but not loaded: solartime, bigleaf, broom
 
-#source("~/Desktop/DATA/Flux/tools/engine/biomet_gapfill.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 source("~/Desktop/DATA/Flux/tools/reference/var_attributes.R")
 source("~/Desktop/DATA/Flux/tools/reference/gf_control.R")
@@ -74,7 +72,7 @@ apply_lag <- function(x, lag) {
 select_clean <- function(data, vars) {
   
   vars <- purrr::map_chr(vars, rlang::as_string)
-  df <- dplyr::select_at(data, dplyr::vars(timestamp, all_of(vars)))
+  df <- dplyr::select_at(data, dplyr::vars(timestamp, dplyr::all_of(vars)))
   
   get_qc_var <- function(x) {
     rlang::as_string(x) %>%
@@ -164,9 +162,9 @@ debias_init <- function(data, aux_data, var, diff = FALSE,
   
   # Apply lag if indicated
   if (lag < 0) {
-    tbl <- mutate(tbl, x = dplyr::lead(x, -lag))
+    tbl <- dplyr::mutate(tbl, x = dplyr::lead(x, -lag))
   } else {
-    tbl <- mutate(tbl, x = dplyr::lag(x, lag))
+    tbl <- dplyr::mutate(tbl, x = dplyr::lag(x, lag))
   } 
   
   # Only include existing pairs of values 
@@ -230,9 +228,9 @@ debias <- function(data, aux_data, var, fit, diff = FALSE, lag = 0, ctrl) {
   
   # Apply lag if indicated
   if (lag < 0) {
-    tbl <- mutate(tbl, x = dplyr::lead(x, -lag))
+    tbl <- dplyr::mutate(tbl, x = dplyr::lead(x, -lag))
   } else {
-    tbl <- mutate(tbl, x = dplyr::lag(x, lag))
+    tbl <- dplyr::mutate(tbl, x = dplyr::lag(x, lag))
   } 
   
   # If differences, reconstruct data using time series fill
@@ -615,8 +613,8 @@ biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
 
 # Add timestamp components, some initialization
 biomet <- biomet %>%
-  mutate(
-    timestamp = ymd_hms(timestamp, tz = md$tz_name),
+  dplyr::mutate(
+    timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name),
     # Calculate vpd (easier to harmonize than RH)
     # - can I use ta_ep here? using ta for now since from the same instrument
     vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
@@ -642,7 +640,9 @@ aux <- dplyr::mutate(
   vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
   qc_vpd = combine_flags(qc_rh, qc_ta),
   # Match appropriate TA vars 
-  !!sym(md$ta_var) := !!sym(pluck(site_metadata, md$closest_site[1], "ta_var"))
+  !!rlang::sym(md$ta_var) := !!rlang::sym(
+    purrr::pluck(site_metadata, md$closest_site[1], "ta_var")
+  )
 )
 
 cat("De-biasing auxilliary data.\n")
@@ -667,7 +667,9 @@ aux_c <- aux %>% select_clean(aux_vars) %>% tibble::as_tibble()
 plots$aux_vars <- plot_harmonies(biomet_c, aux_c, "aux")
 
 # Fit biomet and aux variables to generate de-biasing coefficients
-aux_fits <- map(aux_vars, ~ debias_init(biomet_c, aux_c, ., ctrl = aux_ctrl))
+aux_fits <- purrr::map(
+  aux_vars, ~ debias_init(biomet_c, aux_c, ., ctrl = aux_ctrl)
+)
 
 # De-bias the auxilliary data
 aux_d <- aux_vars %>% 
@@ -709,7 +711,7 @@ cat("Importing ERA file.\n")
 
 # ERA
 era <- read.csv(era_input, stringsAsFactors = FALSE)
-era <- mutate(era, timestamp = ymd_hms(timestamp, tz = "UTC"))
+era <- dplyr::mutate(era, timestamp = lubridate::ymd_hms(timestamp, tz = "UTC"))
 
 cat("Harmonizing ERA data.\n")
 
@@ -723,42 +725,36 @@ era_c <- era %>%
   ) %>%
   # Match appropriate TA vars 
   dplyr::mutate(!!rlang::sym(md$ta_var) := ta) %>%
-  # Adjust swc for offset when wetland is likely inundated
-  # - no! too complicated!!
-  #mutate_at(
-  #  vars(swc2, swc3), flatten_period, 
-  #  n = pluck(md, "drydown_start", as.character(settings$year)) * 24
-  #) %>%
   # Subset current year
   dplyr::right_join(dplyr::select(biomet, timestamp), by = "timestamp") %>% 
   tidyr::drop_na()
 
 # Harmonize biomet temporal resolution with ERA data
 biomet_h <- era_c %>%
-  select(timestamp) %>%
-  left_join(biomet, by = "timestamp") %>%
+  dplyr::select(timestamp) %>%
+  dplyr::left_join(biomet, by = "timestamp") %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (doesn't exist in ERA)
-  mutate(
+  dplyr::mutate(
     swc = roll_mean_real(swc, 7), 
     ts = roll_mean_real(ts, 11)
   ) %>%
   # p_rain is a sum, so need to add half-hours before joining
-  select(-p_rain) %>%
-  left_join(
+  dplyr::select(-p_rain) %>%
+  dplyr::left_join(
     biomet %>%
-      mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
-      group_by(timestamp) %>%
-      summarize(p_rain = sum(p_rain)),
+      dplyr::mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
+      dplyr::group_by(timestamp) %>%
+      dplyr::summarize(p_rain = sum(p_rain)),
     by = "timestamp"
   )
 
 # Combine ERA soil var levels to account for changing WTD throughout year
 era_c <- era_c %>%
-  bind_cols(select(biomet_h, swc, ts)) %>%
+  dplyr::bind_cols(dplyr::select(biomet_h, swc, ts)) %>%
   mutate_at(vars(swc1, swc2, swc3), ~ apply_lag(., get_best_lag(swc, .))) %>%
   mutate_at(vars(ts1, ts2, ts3), ~ apply_lag(., get_best_lag(ts, .))) %>%
-  mutate(
+  dplyr::mutate(
     swc = blend_vars(biomet_h, ., swc, swc2, swc3),
     ts = blend_vars(biomet_h, ., ts, ts2, ts3)
 )
@@ -777,17 +773,17 @@ biomet_hc <- era_c %>%
   dplyr::left_join(biomet_c, by = "timestamp") %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (not the case in ERA)
-  mutate(
+  dplyr::mutate(
     swc = roll_mean_real(swc, 7),  
     ts = roll_mean_real(ts, 11)
   ) %>%
   # p_rain is a sum, so need to add half-hours before joining
-  select(-p_rain) %>%
-  left_join(
+  dplyr::select(-p_rain) %>%
+  dplyr::left_join(
     biomet_c %>%
-      bind_cols(select(biomet, sol_ang)) %>%
-      mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
-      group_by(timestamp) %>%
+      dplyr::bind_cols(dplyr::select(biomet, sol_ang)) %>%
+      dplyr::mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
+      dplyr::group_by(timestamp) %>%
       # Solar angle is used to reconstruct time series
       dplyr::summarize(
         p_rain = sum(p_rain), 
@@ -798,7 +794,7 @@ biomet_hc <- era_c %>%
 
 # Plot harmonization
 plots$era_vars <- biomet_hc %>% 
-  select(-ppfd_in, -sol_ang_h) %>% 
+  dplyr::select(-ppfd_in, -sol_ang_h) %>% 
   plot_harmonies(era_c, "era")
 
 # Calculate average distribution (in half-hrs) of hourly p_rain
@@ -827,29 +823,31 @@ era_fits <- purrr::map(
 
 # De-bias the era data
 era_d <- era_vars %>% 
-  map2(era_fits, ~ debias(biomet_hc, era_c, .x, .y, ctrl = era_ctrl)) %>%
-  set_names(stringr::str_c(era_vars, "_d")) %>%
-  as_tibble() %>%
-  bind_cols(select(biomet_hc, timestamp), .)
+  purrr::map2(era_fits, ~ debias(biomet_hc, era_c, .x, .y, ctrl = era_ctrl)) %>%
+  rlang::set_names(stringr::str_c(era_vars, "_d")) %>%
+  tibble::as_tibble() %>%
+  dplyr::bind_cols(dplyr::select(biomet_hc, timestamp), .)
 
 # Plot results
 plots$era_debias <- plot_fill_vars(era_d, "era_d")
 
 # Get coefficient of ppfd_in/sw_in relationship
 frac_ppfd_era <- biomet_hc %>% 
-  select(ppfd_in) %>% 
-  bind_cols(select(era_d, sw_in_d)) %>%
-  drop_na() %>% 
-  summarize(sum(sw_in_d) / sum(ppfd_in)) %>% 
-  pluck(1)
+  dplyr::select(ppfd_in) %>% 
+  dplyr::bind_cols(dplyr::select(era_d, sw_in_d)) %>%
+  tidyr::drop_na() %>% 
+  dplyr::summarize(sum(sw_in_d) / sum(ppfd_in)) %>% 
+  purrr::pluck(1)
 frac_ppfd_era
 
 # Reconstruct original time series
 era_df <- era_d %>%
   dplyr::rename_all(str_remove, "_d$") %>%
-  bind_cols(select(biomet_hc, sol_ang_h)) %>%
-  right_join(select(biomet, timestamp, sol_ang), by = "timestamp") %>%
-  mutate(
+  dplyr::bind_cols(dplyr::select(biomet_hc, sol_ang_h)) %>%
+  dplyr::right_join(
+    dplyr::select(biomet, timestamp, sol_ang), by = "timestamp"
+  ) %>%
+  dplyr::mutate(
     # Fill ERA solar angle ahead
     sol_ang_h = dplyr::if_else(is.na(sol_ang_h), lead(sol_ang_h), sol_ang_h),
     # Ratio of solar angles determines how to distribute sw_in to half-hours
@@ -865,19 +863,21 @@ era_df <- era_d %>%
       TRUE ~ NA_real_
     )
   ) %>%
-  mutate_at(vars(-timestamp, -p_rain), fill_linear) %>%
-  mutate_at(vars(sw_in, sw_out), ~ . * sol_ang_ratio) %>%
-  mutate(
+  dplyr::mutate(dplyr::across(c(-timestamp, -p_rain), fill_linear)) %>%
+  dplyr::mutate(dplyr::across(c(sw_in, sw_out), ~ . * sol_ang_ratio)) %>%
+  dplyr::mutate(
     # Adhere to local time zone
     timestamp = lubridate::with_tz(timestamp, md$tz_name),
     # Calculate ppfd_in equivalent of sw_in
     ppfd_in = sw_in / frac_ppfd_era
   ) %>%
-  select_at(vars(-contains("sol_ang"))) %>%
-  rename_at(vars(-timestamp), ~ str_c(., "_df"))
+  dplyr::select(-dplyr::contains("sol_ang")) %>%
+  dplyr::rename_with(~ stringr::str_c(., "_df"), -timestamp)
 
 # Plot results
-plots$era_reconst <- era_df %>% select(-ppfd_in_df) %>% plot_fill_vars("era_df")
+plots$era_reconst <- era_df %>% 
+  dplyr::select(-ppfd_in_df) %>% 
+  plot_fill_vars("era_df")
 
 cat("Writing de-biased ERA data.\n")
 
@@ -913,12 +913,12 @@ cat("Generating filled data with MDC algorithm.\n")
 
 # Gather vars that will run MDC
 mdc_names <- gf_vars %>% 
-  enframe(value = "var") %>% 
-  mutate(var = simplify(var)) %>%
-  left_join(enframe(control, name = "var"), by = "var") %>%
-  unnest_wider(value) %>%
-  filter(str_detect(gf_order, "m")) %>%
-  pull(var)
+  tibble::enframe(value = "var") %>% 
+  dplyr::mutate(var = purrr::simplify(var)) %>%
+  dplyr::left_join(tibble::enframe(control, name = "var"), by = "var") %>%
+  tidyr::unnest_wider(value) %>%
+  dplyr::filter(stringr::str_detect(gf_order, "m")) %>%
+  dplyr::pull(var)
 
 # Initialize REddyProc class (necessary for MDC gap-filling)
 biomet_mdc <- suppressMessages(suppressWarnings(sEddyProc$new(
@@ -941,42 +941,47 @@ cat("Gathering all fill variables.\n")
 ta_alt <- purrr::pluck(control, md$ta_var, "gf_backup")
 biomet_f <- biomet_c %>%
   # Add backup variables
-  mutate(
+  dplyr::mutate(
     !!sym(ta_alt) := clean(
-      pull(biomet, !!sym(ta_alt)), pull(biomet, !!sym(str_c("qc_", ta_alt)))
+      dplyr::pull(biomet, !!rlang::sym(ta_alt)), 
+      dplyr::pull(biomet, !!sym(stringr::str_c("qc_", ta_alt)))
     ),
     vpd_ep = clean(biomet$vpd_ep, biomet$qc_vpd_ep),
     ppfd_in_sw = clean(biomet$ppfd_in_sw, biomet$qc_sw_in),
     sw_in_ppfd = clean(biomet$sw_in_ppfd, biomet$qc_ppfd_in)
   ) %>%
-  mutate_at(vars(ppfd_in_sw, sw_in_ppfd), clean, biomet$qc_biomet_all) %>%
+  dplyr::mutate(
+    dplyr::across(c(ppfd_in_sw, sw_in_ppfd), clean, biomet$qc_biomet_all)
+  ) %>%
   # Add debiased aux variables
-  left_join(aux_d, by = "timestamp") %>%
+  dplyr::left_join(aux_d, by = "timestamp") %>%
   # Add debiased era variables
-  left_join(era_df, by = "timestamp") %>%
+  dplyr::left_join(era_df, by = "timestamp") %>%
   # Add MDC variables
-  bind_cols(mdc_results)
+  dplyr::bind_cols(mdc_results)
 
 
 ### Fill gaps in biomet variables ==============================================
 
 # Organize gapfill variables for each biomet variable
 fill_data <- gf_vars %>% 
-  map(~ gather_fill_data(biomet_f, ., ctrl = era_ctrl)) %>%
-  set_names(gf_vars)
+  purrr::map(~ gather_fill_data(biomet_f, ., ctrl = era_ctrl)) %>%
+  rlang::set_names(gf_vars)
 
 cat("Customizing gap filling based on available data.\n")
 
 # Create reference vector indicating which gapfill variable to use
-gf_meths <- imap(fill_data, ~ plan_fill(.x, ctrl = era_ctrl, var = .y))
+gf_meths <- purrr::imap(fill_data, ~ plan_fill(.x, ctrl = era_ctrl, var = .y))
 
 # Create a gapfill QC vector based on method
 gf_qcs <- gf_meths %>% 
   purrr::map(qc_biomet_fmeth) %>% 
   # MDC QC values may vary
-  list_modify(!!!imap(
+  purrr::list_modify(!!!purrr::imap(
     magrittr::extract(gf_meths, mdc_names), 
-    ~ qc_biomet_fmeth(.x, pull(biomet_f, !!sym(str_c(.y, "_fqc"))))
+    ~ qc_biomet_fmeth(
+      .x, dplyr::pull(biomet_f, !!rlang::sym(stringr::str_c(.y, "_fqc")))
+    )
   ))
 
 cat("Filling gaps.\n")
@@ -985,14 +990,18 @@ cat("Filling gaps.\n")
 filled_vars <- purrr::map2(fill_data, gf_meths, gapfill_biomet)
 
 # Add fill vars, methods, and QC variables to main data frame
-biomet <- bind_cols(
+biomet <- dplyr::bind_cols(
   biomet,
-  filled_vars %>% as_tibble() %>% rename_all(~ str_c(., "_f")),
+  filled_vars %>% 
+    tibble::as_tibble() %>% 
+    dplyr::rename_with(~ stringr::str_c(., "_f")),
   gf_meths %>% 
-    as_tibble() %>% 
-    rename_all(~ str_c(., "_fmeth")) %>% 
-    mutate_all(na_if, "x"),
-  gf_qcs %>% as_tibble() %>% rename_all(~ str_c(., "_fqc"))
+    tibble::as_tibble() %>% 
+    dplyr::rename_with(~ stringr::str_c(., "_fmeth")) %>% 
+    dplyr::mutate(dplyr::across(.fns = na_if, "x")),
+  gf_qcs %>% 
+    tibble::as_tibble() %>% 
+    dplyr::rename_with(~ stringr::str_c(., "_fqc"))
 )
 
 cat("Cleaning up results.\n")
@@ -1001,51 +1010,54 @@ cat("Cleaning up results.\n")
 # Used only when potential radiation is 0 (i.e. nighttime) AND sun is not
 #   actively rising or setting, OR when var < 0
 biomet <- biomet %>% 
-  mutate(night2 = magrittr::and(
+  dplyr::mutate(dark = magrittr::and(
     sun_time == "night", lag(sun_time) != "set" & lead(sun_time) != "rise"
   )) %>%
   # Only the ends will be NA, and they are at midnight
-  mutate(night2 = tidyr::replace_na(night2, TRUE)) %>%
-  mutate_at(
-    vars(ppfd_in_f, sw_in_f, sw_out_f), ~ if_else(night2 | . < 0, 0, .)
-  ) %>%
-  mutate_at(
-    vars(ppfd_in_fmeth, sw_in_fmeth, sw_out_fmeth), ~ if_else(night2, "p", .)
-  ) %>%
-  mutate_at(
-    vars(ppfd_in_fqc, sw_in_fqc, sw_out_fqc), ~ if_else(night2, 0L, .)
-  ) %>%
-  select(-night2)
+  dplyr::mutate(dark = tidyr::replace_na(dark, TRUE)) %>%
+  dplyr::mutate(dplyr::across(
+    c(ppfd_in_f, sw_in_f, sw_out_f), ~ dplyr::if_else(dark | . < 0, 0, .)
+  )) %>%
+  dplyr::mutate(dplyr::across(
+    c(ppfd_in_fmeth, sw_in_fmeth, sw_out_fmeth), ~ dplyr::if_else(dark, "p", .)
+  )) %>%
+  dplyr::mutate(dplyr::across(
+    c(ppfd_in_fqc, sw_in_fqc, sw_out_fqc), ~ dplyr::if_else(dark, 0L, .)
+  )) %>%
+  dplyr::select(-dark)
 
 # Set SWC to its maximum at saturation
-biomet <- mutate(
+biomet <- dplyr::mutate(
   biomet, 
   swc_f = pmin(swc_f, md$swc_sat), 
-  swc_fmeth = if_else(swc_f > md$swc_sat, "s", swc_fmeth),
-  swc_fqc = if_else(swc_f > md$swc_sat, 0L, swc_fqc)
+  swc_fmeth = dplyr::if_else(swc_f > md$swc_sat, "s", swc_fmeth),
+  swc_fqc = dplyr::if_else(swc_f > md$swc_sat, 0L, swc_fqc)
 )
 
 # Recalculate net radiation using filled components
-biomet <- mutate(
+biomet <- dplyr::mutate(
   biomet, 
   netrad_f = sw_in_f + lw_in_f - (sw_out_f + lw_out_f), 
-  netrad_fqc = if_else(swc_f > md$swc_sat, 0L, swc_fqc)
+  netrad_fqc = dplyr::if_else(swc_f > md$swc_sat, 0L, swc_fqc)
 )
 
 # Fill RH using filled/converted VPD
 ta_gf_var <- stringr::str_c(md$ta_var, "_f")
 # Make sure that both TA vars are filled
 ta_db_fit <- biomet %>%
-  mutate(!!sym(ta_alt) := pull(biomet, !!sym(ta_alt))) %>%
-  do(fit = lm(
-    !!sym(ta_alt) ~ !!sym(ta_gf_var), na.action = na.exclude, data = .
+  dplyr::mutate(
+    !!rlang::sym(ta_alt) := dplyr::pull(biomet, !!rlang::sym(ta_alt))
+  ) %>%
+  dplyr::do(fit = lm(
+    !!rlang::sym(ta_alt) ~ !!rlang::sym(ta_gf_var), 
+    na.action = na.exclude, data = .
   )) %>%
-  pluck(1, 1)
+  purrr::pluck(1, 1)
 biomet <- biomet %>% 
-  mutate(
+  dplyr::mutate(
     # Fill alternate TA var
-    !!sym(str_c(ta_alt, "_f")) := predict(
-      ta_db_fit, select(biomet, !!sym(ta_gf_var))
+    !!rlang::sym(stringr::str_c(ta_alt, "_f")) := predict(
+      ta_db_fit, dplyr::select(biomet, !!rlang::sym(ta_gf_var))
     ),
     # Reconstruct RH
     rh_f = dplyr::coalesce(
@@ -1055,13 +1067,13 @@ biomet <- biomet %>%
 
 # Additional variable calculations using gap-filled vars
 biomet <- biomet %>% 
-  mutate(
+  dplyr::mutate(
     # Albedo
     albedo = sw_out_f / sw_in_f,
     # Water suface temperature
     tw_surf = (lw_out / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
     # Potential evapotranspiration
-    et_pot = pull(
+    et_pot = dplyr::pull(
       bigleaf::potential.ET(., "ta_ep_f", "pa_ep_f", "netrad_f", "g_f"), ET_pot
     ),
     # Likely fog indicator
@@ -1072,17 +1084,17 @@ cat("Plotting results.\n")
 
 # Plot results
 plots$gf_results <- biomet %>% 
-  select_at(vars(timestamp, ends_with("_f"))) %>% 
+  dplyr::select(timestamp, dplyr::ends_with("_f")) %>% 
   plot_fill_vars("var_f")
 
 plots_fmeth <- gf_vars %>% 
-  map(~ plot_filled(biomet, ., "fmeth")) %>% 
-  set_names(str_c(gf_vars, "_fmeth"))
+  purrr::map(~ plot_filled(biomet, ., "fmeth")) %>% 
+  rlang::set_names(stringr::str_c(gf_vars, "_fmeth"))
 plots <- append(plots, plots_fmeth)
 
 plots_fqc <- gf_vars %>% 
-  map(~ plot_filled(biomet, ., "fqc")) %>% 
-  set_names(str_c(gf_vars, "_fqc"))
+  purrr::map(~ plot_filled(biomet, ., "fqc")) %>% 
+  rlang::set_names(stringr::str_c(gf_vars, "_fqc"))
 plots <- append(plots, plots_fqc)
 
 
