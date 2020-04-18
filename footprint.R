@@ -270,9 +270,10 @@ if (control$ffp) {
   aoi_grid <- trim_matrix(aoi_grid)
   
   # Write grid to file
-  write_matrix(grid$x, file.path(ffp_out, "grid", "x"), trunc = NA)
-  write_matrix(grid$y, file.path(ffp_out, "grid", "y"), trunc = NA)
-  write_matrix(aoi_grid, file.path(ffp_out, "grid", "aoi"), trunc = NA)
+  purrr::imap(
+    purrr::list_modify(grid, aoi = aoi_grid), 
+    ~ write_matrix(.x, file.path(ffp_out, "grid", .y), trunc = NA)
+  )
   
   # Calculate footprints, create raster images, write to file
   
