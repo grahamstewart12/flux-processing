@@ -10,15 +10,54 @@
 
 # Load the required packages
 suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
-library(openeddy)
+devtools::load_all("~/R Projects/footprints")
+library(progress)
 library(lubridate)
 library(tidyverse)
 
-source("~/Desktop/DATA/Flux/tools/engine/footprint.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
-# Initialize script settings & documentation
-script_init(settings, site_metadata)
+
+### Helper functions ===========================================================
+
+progress_info <- function(len) {
+  
+  progress_bar$new(
+    total = len, 
+    format = paste0(
+      "[:spin] Completed: :current (:percent)  ", 
+      "Elapsed: :elapsed  Remaining: :eta"
+    )
+  )
+}
+
+
+### Initialize script settings & documentation =================================
+
+# Load metadata file
+md <- purrr::pluck(site_metadata, settings$site)
+
+# Set the desired working directory in RStudio interface
+# - assumes that the subdirectory structure is already present
+wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+path_in <- file.path(wd, "processing_data", "05_biomet_gapfill", "output")
+  
+# Input file - biomet output with QC flags
+site_input <- latest_version(path_in, "biomet_gf")
+  
+# Input file - processed ERA data for site location
+era_input <- latest_version(
+  file.path("~/Desktop", "DATA", "Flux", "JLL", "all", "output"), "era_proc"
+)
+  
+# AOI
+aoi_input <- file.path(dirname(wd), paste0(settings$site, "_area_proc"))
+  
+# Set tag for creating output file names
+tag_out <- create_tag(settings$site, settings$year, settings$date)
+  
+# Set path for output files
+path_out <- file.path(wd, "processing_data", "06_footprint", "output")
 
 
 ### Load required input data ===================================================
@@ -28,7 +67,7 @@ site <- read.csv(site_input, stringsAsFactors = FALSE)
 
 # Add timestamp components
 site <- site %>%
-  mutate(timestamp = ymd_hms(timestamp, tz = md$tz_name)) %>%
+  dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
   add_time_comps()
 
 # Import site AOI polygon
@@ -37,38 +76,16 @@ aoi <- rgdal::readOGR(aoi_input, verbose = FALSE)
 # Import ERA data, get variables
 era <- read.csv(era_input, stringsAsFactors = FALSE)
 era <- era %>%
-  mutate(timestamp = ymd_hms(timestamp) %>% with_tz(md$tz_name)) %>%
-  select(timestamp, blh)
+  dplyr::mutate(
+    timestamp = lubridate::ymd_hms(timestamp) %>% lubridate::with_tz(md$tz_name)
+  ) %>%
+  dplyr::select(timestamp, blh)
 
 # Add to main data frame
 site <- site %>%
-  left_join(era, by = "timestamp") %>%
+  dplyr::left_join(era, by = "timestamp") %>%
   # Interpolate hourly -> half-hourly
-  mutate(blh = approx(seq_along(blh), blh, seq_along(blh))$y)
-
-
-### Create a vectorized area boundary ==========================================
-# - used for fetch filtering in QC
-
-# Set the desired resolution (width of wind_dir bins)
-# - smoothing not necessary, but removes some bias if area deliminated manually
-#boundary <- roi_boundary(
-#  aoi, res = 5, c(md$x_utm, md$y_utm), smooth = TRUE, smooth_method = "densify"
-#)
-
-# Write to .csv file
-#boundary_out <- file.path(path_out, paste0("boundary_vec_", tag_out, ".csv"))
-#write.csv(boundary, boundary_out, row.names = FALSE)
-
-# Create documentation for phi output
-#boundary_docu <- settings
-#boundary_docu$files <- c(aoi_input)
-#boundary_docu$settings <- list(res = 5, smooth = TRUE)
-#boundary_docu_out <- str_replace(boundary_out, ".csv", ".txt")
-# Save documentation
-#sink(boundary_docu_out)
-#boundary_docu 
-#sink()
+  dplyr::mutate(blh = approx(seq_along(blh), blh, seq_along(blh))$y)
 
 
 ### Calculate 1-D footprints (fetch lengths) ===================================
@@ -83,11 +100,11 @@ if (control$fetch) {
   )
   
   # Rename with method ID tag
-  fetch <- rename_all(
-    fetch, list(~ stringr::str_c(., tolower(control$fetch_model)))
+  fetch <- dplyr::rename_with(
+    fetch, ~ stringr::str_c(., tolower(control$fetch_model))
   )
   
-  fetch <- bind_cols(select(site, timestamp), fetch)
+  fetch <- dplyr::bind_cols(dplyr::select(site, timestamp), fetch)
   
   fetch_out <- file.path(
     path_out, paste0("fetch_", tag_out, ".csv")
@@ -98,7 +115,7 @@ if (control$fetch) {
   fetch_docu <- settings
   fetch_docu$files <- c(site_input)
   fetch_docu$method <- control$fetch_model
-  fetch_docu_out <- str_replace(fetch_out, ".csv", ".txt")
+  fetch_docu_out <- stringr::str_replace(fetch_out, ".csv", ".txt")
   # Save documentation
   sink(fetch_docu_out)
   fetch_docu 
@@ -115,20 +132,21 @@ if (control$fp) {
   
   # Select only necessary variables, remove missing data
   site_fp <- site %>% 
-    select(timestamp, wd, ustar, mo_length, v_sigma) %>%
-    drop_na()
+    dplyr::select(timestamp, wd, ustar, mo_length, v_sigma) %>%
+    tidyr::drop_na()
   
   # Set up grid
-  grid <- fp_grid(fetch = (md$tower_height - md$displacement) * 100)
+  grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
   
+  # Convert AOI to grid
+  aoi_grid <- aoi_to_grid(aoi, grid, c(md$x_utm, md$y_utm))
   
   # Calculate footprints, create raster images, write to file
   # WARNING: this takes ~1 hr to run
   
   # Initialize loop
-  len <- nrow(site_fp)
-  phi_hh <- vector("list", length = len)
-  progress <- progress_estimated(len)
+  phi_hh <- vector("list", length = nrow(site_fp))
+  p <- progress_info(nrow(site_fp))
   
   # Calculate footprint matrices
   for (i in 1:len) {
@@ -171,7 +189,7 @@ if (control$fp) {
       format = "GTiff", overwrite = TRUE, datatype = "INT4S"
     )
     
-    progress$tick()$print()
+    p$tick()
     
   }
   
@@ -179,9 +197,11 @@ if (control$fp) {
   # Write file with just footprint data so this doesn't have to be run again
   fp_basics <- phi_hh %>% 
     tibble::enframe(name = "timestamp", value = "phi") %>% 
-    mutate(timestamp = ymd_hms(timestamp, tz = md$tz_name)) %>%
-    unnest(phi) %>%
-    right_join(select(site, timestamp))
+    dplyr::mutate(
+      timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
+    ) %>%
+    tidyr::unnest(phi) %>%
+    dplyr::right_join(dplyr::select(site, timestamp))
   
   fp_basics_out <- file.path(
     path_out, paste0("footprint_basics_", tag_out, ".csv")
@@ -194,7 +214,7 @@ if (control$fp) {
   fp_basics_docu$model_params <- list(
     method = "H00", fetch = attr(grid, "fetch"), res = attr(grid, "res")
   )
-  fp_basics_docu_out <- str_replace(fp_basics_out, ".csv", ".txt")
+  fp_basics_docu_out <- stringr::str_replace(fp_basics_out, ".csv", ".txt")
   # Save documentation
   sink(fp_basics_docu_out)
   fp_basics_docu 
@@ -206,17 +226,23 @@ if (control$fp) {
 
 if (control$ffp) {
   # See Kljun et al. 2015
-  #source("~/Desktop/DATA/Flux/tools/FFP_R/calc_footprint_FFP.R")
-  #source("~/Desktop/DATA/Flux/tools/FFP_R/calc_footprint_FFP_climatology.R")
   
   # Create new folder for output files
   ffp_out <- file.path(path_out, paste0("half_hourly_ffp_", tag_out))
-  dir.create(ffp_out)
+  dir.create(ffp_out, showWarnings = FALSE)
+  
+  # Create sub-folders for grid and footprint matrices
+  dir.create(file.path(ffp_out, "grid"), showWarnings = FALSE)
+  dir.create(file.path(ffp_out, "footprints"), showWarnings = FALSE)
   
   # Select only necessary variables, remove missing data
   site_ffp <- site %>% 
-    select(timestamp, wd, ustar, mo_length, v_sigma, blh) %>%
-    drop_na()
+    dplyr::select(timestamp, wd, ustar, mo_length, v_sigma, blh) %>%
+    tidyr::drop_na() %>%
+    dplyr::mutate(
+      zd = md$displacement, 
+      zo = md$roughness_length
+    )
   # Pre-filter known invalid cases (not using - just calculate all fp then see)
   # - NOTE: for ustar Kljun only indicate > 0.1, but adding upper limit of 2.0
   # - Olson et al. 2004 (FLUXNET) suggest 6.0, but here there are none >1 & <2
@@ -227,87 +253,106 @@ if (control$ffp) {
   #)
   
   # Set up grid
-  grid <- fp_grid(fetch = (md$tower_height - md$displacement) * 100)
+  grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
+  
+  # Convert AOI to grid
+  aoi_grid <- aoi_to_grid(aoi, grid, c(md$x_utm, md$y_utm))
+  
+  # Extent of AOI for trimming footprint grid
+  extent_trim <- get_trim_extent(aoi_grid)
+  
+  # Trim grid to AOI area
+  # - no need to calculate footprint weights outside of AOI 
+  # - these are implicit in phi
+  grid <- purrr::map(grid, trim_matrix, extent_trim)
+  
+  # Trim AOI
+  aoi_grid <- trim_matrix(aoi_grid)
+  
+  # Write grid to file
+  write_matrix(grid$x, file.path(ffp_out, "grid", "x"), trunc = NA)
+  write_matrix(grid$y, file.path(ffp_out, "grid", "y"), trunc = NA)
+  write_matrix(aoi_grid, file.path(ffp_out, "grid", "aoi"), trunc = NA)
   
   # Calculate footprints, create raster images, write to file
-  # WARNING: this takes ~1 hr to run
   
   # Initialize loop
-  len <- nrow(site_ffp)
-  ffp_phi_hh <- vector("list", length = len)
-  progress <- progress_estimated(len)
+  ffp_phi_hh <- vector("list", length = nrow(site_ffp))
+  p <- progress_info(nrow(site_ffp))
   
   # Calculate footprint matrices
-  for (i in 1:len) {
+  for (i in 1:nrow(site_ffp)) {
     
     # Calculate footprint, add to list
-    ffp_temp <- fp_calculate(
+    ffp_temp <- calc_fp_kljun(
+      grid = grid,
       wd = site_ffp$wd[i],
       ustar = site_ffp$ustar[i],
       mo_length = site_ffp$mo_length[i],
       v_sigma = site_ffp$v_sigma[i],
       blh = site_ffp$blh[i],
       z = md$tower_height,
-      zd = md$displacement,
-      zo = md$roughness_length,
-      grid = grid,
-      model = "K15"
+      zd = site_ffp$zd[i],
+      zo = site_ffp$zo[i]
     )
-    
-    # Set output name as the timestamp
-    ffp_temp_name <- format(site_ffp$timestamp[i], "%Y-%m-%d-%H%M%S")
-    
-    # Rasterize
-    ffp_temp_rst <- fp_rasterize(
-      ffp_temp, grid = grid, coords = c(md$x_utm, md$y_utm), 
-      crs = raster::crs(aoi)
-    )
-    
-    # Clip to AOI
-    ffp_temp_rst <- raster::mask(ffp_temp_rst, aoi) %>% raster::trim()
     
     # Calculate AOI coverage
-    ffp_phi_hh[i] <- raster::cellStats(ffp_temp_rst, sum)
-    names(ffp_phi_hh)[i] <- ffp_temp_name
+    ffp_phi_hh[i] <- sum(ffp_temp * aoi_grid)
     
-    # Scale for more efficient storage as integer values
-    ffp_temp_rst <- ffp_temp_rst * 1e9
+    # Set output name as the timestamp
+    ffp_temp_nm <- format(site_ffp$timestamp[i], "%Y-%m-%d-%H%M%S")
+    names(ffp_phi_hh)[i] <- ffp_temp_nm
     
     # Write to file
-    raster::writeRaster(
-      ffp_temp_rst, file.path(ffp_out, ffp_temp_name), 
-      format = "GTiff", overwrite = TRUE, datatype = "INT4S"
-    )
+    # - values are truncated to enable efficient storage as integers
+    # - this can be suppressed by setting trunc = NA in write_matrix() 
+    write_matrix(ffp_temp, file.path(ffp_out, "footprints", ffp_temp_nm))
     
-    progress$tick()$print()
+    p$tick()
   }
+  
+  ffp_dir_size <- file.path(ffp_out, "footprints") %>% 
+    list.files(full.names = TRUE) %>%
+    magrittr::extract(1:50) %>%
+    purrr::map_dbl(~ file.info(.)$size) %>% 
+    mean() %>%
+    magrittr::multiply_by(nrow(site_ffp)) %>%
+    magrittr::divide_by(1e9) %>%
+    round(2)
+  
+  cat(
+    "\nFinished calculating footprints.\n", 
+    "Matrix files can be found in:", file.path(ffp_out, "footprints"), "\n",
+    "Total size of directory:", ffp_dir_size, "GB\n"
+  )
+  cat("Writing summary output...")
   
   # Write file with just footprint data so this doesn't have to be run again
   ffp_basics <- ffp_phi_hh %>% 
     tibble::enframe(name = "timestamp", value = "phi_ffp") %>% 
-    mutate(timestamp = ymd_hms(timestamp, tz = md$tz_name)) %>%
-    unnest(phi_ffp) %>%
-    right_join(select(site, timestamp, ustar, mo_length)) %>%
+    dplyr::mutate(
+      timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
+    ) %>%
+    tidyr::unnest(phi_ffp) %>%
+    dplyr::right_join(dplyr::select(site, timestamp, ustar, mo_length)) %>%
     # Classify phi according to Gockede et al. 2008
-    mutate(
-      phi_ffp_class = case_when(
+    dplyr::mutate(
+      phi_ffp_class = dplyr::case_when(
         # Homogenous measurements
-        between(phi_ffp, 0.95, 1.00) ~ 0L,
+        dplyr::between(phi_ffp, 0.95, 1.00) ~ 0L,
         # Representative measurements
-        between(phi_ffp, 0.80, 0.95) ~ 1L,
+        dplyr::between(phi_ffp, 0.80, 0.95) ~ 1L,
         # Acceptable measurements
-        between(phi_ffp, 0.50, 0.80) ~ 2L,
+        dplyr::between(phi_ffp, 0.50, 0.80) ~ 2L,
         # Disturbed measurements
-        between(phi_ffp, 0.00, 0.50) ~ 3L
+        dplyr::between(phi_ffp, 0.00, 0.50) ~ 3L
       ),
       zeta = ((md$tower_height - md$displacement) / mo_length),
-      ffp_inval = case_when(
-        !between(ustar, 0.1, 2) ~ 1L,
-        zeta < -15.5 ~ 1L,
-        TRUE ~ 0L
+      ffp_valid = dplyr::if_else(
+        magrittr::and(dplyr::between(ustar, 0.1, 2), zeta >= -15.5), 1L, 0L
       )
     ) %>% 
-    select(-ustar, -mo_length, -zeta)
+    dplyr::select(-ustar, -mo_length, -zeta)
   
   ffp_basics_out <- file.path(
     path_out, paste0("footprint_basics_ffp_", tag_out, ".csv")
@@ -316,17 +361,21 @@ if (control$ffp) {
   
   # Create documentation for phi output
   ffp_basics_docu <- settings
-  ffp_basics_docu$files <- c(site_input, aoi_input)
-  ffp_basics_docu$model_params <- list(
-    method = "K15", fetch = attr(grid, "fetch"), res = attr(grid, "res")
+  ffp_basics_docu <- append(
+    settings, list(
+      files = c(site_input, era_input, aoi_input),
+      model_params = list(
+        method = "K15", fetch = attr(grid, "fetch"), res = attr(grid, "res")
+      )
+    )
   )
-  ffp_basics_docu_out <- str_replace(ffp_basics_out, ".csv", ".txt")
+  ffp_basics_docu_out <- stringr::str_replace(ffp_basics_out, ".csv", ".txt")
   # Save documentation
   sink(ffp_basics_docu_out)
   ffp_basics_docu 
   sink()
+  
+  cat("done.\n")
 }
-
-
 
 
