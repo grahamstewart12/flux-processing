@@ -161,7 +161,9 @@ lists_sub <- lists %>%
   purrr::map(purrr::discard, is.null)
 
 # Subset data based on correct calibrations if applicable
-recal <- purrr::pluck(control, settings$site, settings$year, "recal_periods")
+recal <- control %>% 
+  purrr::pluck(settings$site, settings$year, "recal_periods") %>%
+  purrr::map(lubridate::as_datetime)
 
 if (!all(is.na(recal))) {
   
@@ -171,46 +173,28 @@ if (!all(is.na(recal))) {
   # - only supports one recal dir (for now)
   recal_dir <- stringr::str_subset(ep_dirs, "recal")
   
-  # Pull timestamp from first recal file (should be same for all)
-  recal_timestamp <- purrr::pluck(lists_sub, 1, recal_dir, "timestamp")
-  
-  # Generate timestamp subset key 
-  recal_subset <- recal %>%
-    # Get indices of timestamps included in each period
-    purrr::map(
-      ~ which(dplyr::between(
-        recal_timestamp, 
-        lubridate::as_datetime(.[1]), lubridate::as_datetime(.[2])
-      ))
-    ) %>%
-    # Take union of all periods
-    purrr::reduce(union)
-  
-  # Subset the data
-  lists_sub <- purrr::map(
-    lists_sub, purrr::map_at, recal_dir, dplyr::slice, recal_subset
-  )
-  
-  # Remove recal periods from non-recal data
-  
-  # Pull updated timestamp from recal data
-  recal_timestamp2 <- purrr::pluck(lists_sub, 1, recal_dir, "timestamp")
-  
   # Get non-recal dirs
   other_dirs <- stringr::str_subset(ep_dirs, "recal", negate = TRUE)
   
-  # Subset the data
-  lists_sub <- purrr::map(
-    lists_sub, purrr::map_at, other_dirs, 
-    dplyr::filter, !timestamp %in% recal_timestamp2
-  )
+  # Build logical expressions for subsetting periods
+  recal_logic <- 1:length(recal) %>% 
+    purrr::map(
+      ~ stringr::str_glue("between2(timestamp, recal[[", .x, "]])")
+    ) %>% 
+    glue::glue_collapse(sep = " | ") %>% 
+    stringr::str_glue("(", ., ")")
+  other_logic <- stringr::str_glue("!", recal_logic)
   
-  # Another way to do this:
-  # 1. mutate(recal = if_else(recal, 1, 2))
-  # 2. combine
-  # 3. group_by(timestamp)
-  # 4. arrange(recal)
-  # 5. slice(1)
+  # Subset the data
+  lists_sub <- lists_sub %>%
+    # Remove non-recal periods from recal data
+    purrr::map(
+      purrr::map_at, recal_dir, dplyr::filter, !!rlang::parse_expr(recal_logic)
+    ) %>%
+    # Remove recal periods from non-recal data
+    purrr::map(
+      purrr::map_at, other_dirs, dplyr::filter, !!rlang::parse_expr(other_logic)
+    )
 }
 
 cat("done.\n")
@@ -354,5 +338,8 @@ end_time <- Sys.time()
 elapsed_time <- round(unclass(end_time - start_time), 3)
 
 cat("done.\n")
-cat("Finished processing in", elapsed_time, attr(elapsed_time, "units"), ".\n")
+cat(
+  "Finished processing in ", elapsed_time, " ", attr(elapsed_time, "units"), 
+  ".\n", sep = ""
+)
 cat("Output located in", path_out, "\n")
