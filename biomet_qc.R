@@ -22,9 +22,10 @@
 
 # Output(s):
 
+start_time <- Sys.time()
+
 # Load the required packages
 suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
-library(openeddy)
 library(lubridate)
 library(tidyverse)
 
@@ -43,6 +44,26 @@ acf_1 <- function(x) {
     purrr::pluck(2)
 }
 
+flag_thr <- function(x, thr, 
+                     rule = c("higher", "lower", "outside", "between")) {
+  
+  rule <- rlang::arg_match(rule)
+  
+  if (rule == "higher") {
+    flag <- dplyr::if_else(x > thr, 2L, 0L)
+  } else if (rule == "lower") {
+    flag <- dplyr::if_else(x < thr, 2L, 0L)
+  } else if (rule == "outside") {
+    thr <- sort(thr)
+    flag <- dplyr::if_else(x < thr[1] | x > thr[2], 2L, 0L)
+  } else if (rule == "between") {
+    thr <- sort(thr)
+    flag <- dplyr::if_else(x > thr[1] & x < thr[2], 2L, 0L)
+  }
+  
+  flag
+}
+
 validate_flags <- function(data, var1, var2) {
   
   var1_name <- rlang::ensym(var1) %>% rlang::as_string()
@@ -55,13 +76,13 @@ validate_flags <- function(data, var1, var2) {
   # Extract flags for each var
   var1_flags <- data %>%
     purrr::pluck(var1_name) %>%
-    dplyr::rename_all(
-      stringr::str_remove_all, stringr::str_c("qc_", var1_name, "_")
+    dplyr::rename_with(
+      ~ stringr::str_remove_all(.x, stringr::str_c("qc_", var1_name, "_"))
     )
   var2_flags <- data %>% 
     purrr::pluck(var2_name) %>%
-    dplyr::rename_all(
-      stringr::str_remove_all, stringr::str_c("qc_", var2_name, "_")
+    dplyr::rename_with(
+      ~ stringr::str_remove_all(.x, stringr::str_c("qc_", var2_name, "_"))
     )
   
   # Subset flags used in both vars
@@ -101,7 +122,7 @@ biomet_auto_flags <- function(data, var, p_rain) {
   
   cat(var_name, "...", sep = "")
   
-  tbl <- data %>%
+  dt <- data %>%
     tibble::as_tibble() %>%
     dplyr::transmute(
       timestamp = timestamp,
@@ -128,30 +149,26 @@ biomet_auto_flags <- function(data, var, p_rain) {
   # - acf checks sigma test
   
   # Operates on points within days: range, delta, step
-  pd <- tbl %>% 
-    dplyr::select(x, dx, date, timestamp) %>% 
-    tidyr::nest(data = c(timestamp, x, dx)) %>% 
+  pd <- dt %>% 
+    dplyr::select(x, dx, date, timestamp) %>%
+    dplyr::group_by(date) %>%
     # Compute statistics
     dplyr::mutate(
       # Range test
-      x = purrr::map(data, dplyr::pull, x), 
-      x_mean = purrr::map_dbl(x, base::mean, na.rm = TRUE), 
-      x_sigma = purrr::map_dbl(x, stats::sd, na.rm = TRUE), 
+      x_mean = mean(x, na.rm = TRUE), 
+      x_sigma = sd(x, na.rm = TRUE),
       x_lo = x_mean - 2 * x_sigma, 
       x_hi = x_mean + 2 * x_sigma,
       
       # Delta & step test
-      dx = purrr::map(data, dplyr::pull, dx),
-      dx_mean = purrr::map_dbl(dx, base::mean, na.rm = TRUE), 
-      dx_sigma = purrr::map_dbl(dx, stats::sd, na.rm = TRUE), 
+      dx_mean = mean(dx, na.rm = TRUE), 
+      dx_sigma = sd(dx, na.rm = TRUE),
       dx_lo = dx_mean - 2 * dx_sigma, 
       dx_hi = dx_mean + 2 * dx_sigma,
       
-      abs_mean = purrr::map_dbl(x, ~ mean(abs(.), na.rm = TRUE))
-    ) %>% 
-    dplyr::select(-x, -dx) %>% 
-    tidyr::unnest(data) %>% 
-    dplyr::arrange(timestamp) %>%
+      abs_mean = mean(abs(x), na.rm = TRUE)
+    ) %>%
+    dplyr::ungroup() %>%
     # Flag point values
     dplyr::mutate(
       range = dplyr::if_else(x < x_lo | x > x_hi, 2L, 0L),
@@ -181,48 +198,40 @@ biomet_auto_flags <- function(data, var, p_rain) {
   # - large jumps are reasonable if it rained (+/- 1 lag)
   if (var_name %in% c("swc", "ts")) {
     pd <- pd %>%
-      dplyr::bind_cols(tbl) %>%
-      dplyr::mutate_at(
-        dplyr::vars(range, step), 
-        ~ dplyr::if_else(around(p, ~ .x > 0), pmax(. - 1L, 0L), .)
-      ) %>%
+      dplyr::bind_cols(dt) %>%
+      dplyr::mutate(dplyr::across(
+        c(range, step), 
+        ~ dplyr::if_else(around(p, ~ .x > 0), pmax(.x - 1L, 0L), .x)
+      )) %>%
       dplyr::select(range, delta, step)
   }
   
   # Operates on days within months: sigma, spike
-  dm <- tbl %>% 
-    dplyr::select(x, dx, month, date, timestamp) %>% 
-    tidyr::nest(data = c(timestamp, x, dx)) %>% 
+  dm <- dt %>% 
+    dplyr::select(x, dx, month, date, timestamp) %>%
+    dplyr::group_by(month, date) %>%
     # Compute statistics
-    dplyr::mutate(
-      x = purrr::map(data, dplyr::pull, x),
-      x_var = purrr::map_dbl(x, stats::sd, na.rm = TRUE),
+    dplyr::summarize(
+      x_var = sd(x, na.rm = TRUE),
       
-      dx = purrr::map(data, dplyr::pull, dx),
-      dx_var = purrr::map_dbl(dx, stats::sd, na.rm = TRUE),
+      dx_var = sd(dx, na.rm = TRUE),
       
-      acf = purrr::map_dbl(x, acf_1)
+      acf = acf_1(x)
     ) %>%
-    dplyr::select(-x, -dx) %>%
-    tidyr::unnest(data) %>%
-    tidyr::nest(data = c(date, timestamp, x, dx, x_var, dx_var, acf)) %>%
     dplyr::mutate(
       # Sigma test
-      x_var = purrr::map(data, dplyr::pull, x_var), 
-      x_mean = purrr::map_dbl(x_var, base::mean, na.rm = TRUE), 
-      x_sigma = purrr::map_dbl(x_var, stats::sd, na.rm = TRUE), 
+      x_mean = mean(x_var, na.rm = TRUE), 
+      x_sigma = sd(x_var, na.rm = TRUE), 
       v_lo = x_mean - 2 * x_sigma, 
       v_hi = x_mean + 2 * x_sigma,
       
       # Spike test
-      dx_var = purrr::map(data, dplyr::pull, dx_var), 
-      dx_mean = purrr::map_dbl(dx_var, base::mean, na.rm = TRUE), 
-      dx_sigma = purrr::map_dbl(dx_var, stats::sd, na.rm = TRUE), 
+      dx_mean = mean(dx_var, na.rm = TRUE), 
+      dx_sigma = sd(dx_var, na.rm = TRUE), 
       k_lo = dx_mean - 2 * dx_sigma, 
       k_hi = dx_mean + 2 * dx_sigma
-    ) %>% 
-    dplyr::select(-x_var, -dx_var) %>% 
-    tidyr::unnest(data) %>% 
+    ) %>%
+    dplyr::ungroup() %>%
     dplyr::mutate(
       # Secondary check on sigma/spike tests - not worth flagging
       # - set absolute limit on low based on mean - 1sd of all data
@@ -240,58 +249,52 @@ biomet_auto_flags <- function(data, var, p_rain) {
       v_flag = dplyr::if_else(acf >= 0.90, pmax(v_flag - 1L, 0L), v_flag),
       k_flag = dplyr::if_else(acf >= 0.90, pmax(k_flag - 1L, 0L), k_flag)
     ) %>%
+    # Expand daily values to full time series
+    dplyr::right_join(dplyr::select(dt, date), by = "date") %>%
     dplyr::select(sigma = v_flag, spike = k_flag)
   
   # Cross-check SWC & TS sigma, spike flags against P_RAIN
   # - large jumps are reasonable if it rained that day
   if (var_name %in% c("swc", "ts")) {
     dm <- dm %>%
-      dplyr::bind_cols(dplyr::select(tbl, date, p)) %>%
+      dplyr::bind_cols(dplyr::select(dt, date, p)) %>%
       dplyr::group_by(date) %>%
       dplyr::mutate(p = sum(p, na.rm = TRUE)) %>%
       dplyr::ungroup() %>%
-      dplyr::mutate_at(
-        dplyr::vars(sigma, spike), 
-        ~ dplyr::if_else(p > 0.1, pmax(. - 1L, 0L), .)
-      ) %>%
+      dplyr::mutate(dplyr::across(
+        c(sigma, spike), ~ dplyr::if_else(p > 0.1, pmax(.x - 1L, 0L), .x)
+      )) %>%
       dplyr::select(sigma, spike)
   }
   
   
   # Operates on days within years: null
   # - no empirical checks since this already indicates underlying issues
-  # - but disregard flag if missing data is <10%
-  dy <- tbl %>% 
-    dplyr::select(x, year, date, timestamp) %>% 
-    tidyr::nest(data = c(timestamp, x)) %>% 
-    dplyr::mutate(
-      x = purrr::map(data, dplyr::pull, x),
-      # Number of non-missing values (exclude days that are entirely missing)
-      n = purrr::map_dbl(x, ~ dplyr::na_if(length(na.omit(.)), 0))
-    ) %>%
-    dplyr::select(-x) %>%
-    tidyr::unnest(data) %>%
-    tidyr::nest(data = c(date, timestamp, x, n)) %>%
+  # - but disregard flag if missing data is <15%
+  dy <- dt %>% 
+    dplyr::select(x, year, date, timestamp) %>%
+    dplyr::group_by(date) %>%
+    # Number of non-missing values (exclude days that are entirely missing)
+    dplyr::summarize(n = dplyr::na_if(length(na.omit(x)), 0)) %>%
     dplyr::mutate(
       # Null test
-      n = purrr::map(data, dplyr::pull, n), 
-      n_mean = purrr::map_dbl(n, base::mean, na.rm = TRUE), 
-      n_sigma = purrr::map_dbl(n, stats::sd, na.rm = TRUE), 
-      n_lo = n_mean - 2 * n_sigma
-    ) %>% 
-    dplyr::select(-n) %>% 
-    tidyr::unnest(data) %>% 
-    dplyr::mutate(
+      n_mean = mean(n, na.rm = TRUE), 
+      n_sigma = sd(n, na.rm = TRUE), 
+      n_lo = n_mean - 2 * n_sigma,
+      
       null = dplyr::if_else(n < n_lo, 2L, 0L),
-      # Don't bother flagging if n missing is less than 6
-      null = dplyr::if_else(n > 42, pmax(null - 1L, 0L), null)
+      # Don't bother flagging if n missing is less than 8
+      null = dplyr::if_else(n > 40, pmax(null - 1L, 0L), null)
     ) %>%
+    # Expand daily values to full time series
+    dplyr::right_join(dplyr::select(dt, date), by = "date") %>%
     dplyr::select(null)
   
   cat("done. ", sep = "")
   
   # Output tbl of all flags
-  dplyr::bind_cols(pd, dm, dy) %>% dplyr::mutate_all(tidyr::replace_na, 0L)
+  dplyr::bind_cols(pd, dm, dy) %>% 
+    dplyr::mutate(dplyr::across(.fns = ~ tidyr::replace_na(.x, 0L)))
 }
 
 flag_var_diffs <- function(data, var1, var2, qc_data, alpha = 0.001) {
@@ -303,27 +306,19 @@ flag_var_diffs <- function(data, var1, var2, qc_data, alpha = 0.001) {
   
   # Gather var1 flags
   var1_flags <- qc_data %>% 
-    dplyr::select_at(
-      dplyr::vars(tidyselect::contains(stringr::str_c("_", var1_name, "_")))
-    ) %>%
-    dplyr::mutate_all(~dplyr::if_else(. == 1, 0L, .))
+    dplyr::select(dplyr::contains(stringr::str_c("_", var1_name, "_"))) %>%
+    dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
   if (!stringr::str_detect(var1_name, "_ep")) {
-    var1_flags <- dplyr::select_at(
-      var1_flags, dplyr::vars(-tidyselect::contains("_ep_"))
-    )
+    var1_flags <- dplyr::select(var1_flags, -dplyr::contains("_ep_"))
   }
   qc_var1 <- combine_flags(var1_flags)
   
   # Gather var2 flags
   var2_flags <- qc_data %>% 
-    dplyr::select_at(
-      dplyr::vars(tidyselect::contains(stringr::str_c("_", var2_name, "_")))
-    ) %>%
-    dplyr::mutate_all(~dplyr::if_else(. == 1, 0L, .))
+    dplyr::select(dplyr::contains(stringr::str_c("_", var2_name, "_"))) %>%
+    dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
   if (!stringr::str_detect(var2_name, "_ep")) {
-    var2_flags <- dplyr::select_at(
-      var2_flags, dplyr::vars(-tidyselect::contains("_ep_"))
-    )
+    var2_flags <- dplyr::select(var2_flags, -dplyr::contains("_ep_"))
   }
   qc_var2 <- combine_flags(var2_flags)
   
@@ -379,26 +374,24 @@ plot_flags <- function(data, var, qc_data, geom = c("point", "line")) {
       stringr::str_c("qc", .) %>% 
       stringr::str_remove("_$") %>% rlang::sym()
     qc_data <- tibble::tibble(!!qc_var := dplyr::pull(data, !!qc_var)) %>%
-      dplyr::rename_all(~ stringr::str_c(., "_all"))
+      dplyr::rename_with(~ stringr::str_c(., "_all"))
   }
   
   
   # If qc_data is not a data frame, assume it is a column in data
   if (!inherits(rlang::eval_tidy(qc_data), "data.frame")) {
     qc_data <- tibble::tibble(!!qc_data := dplyr::pull(data, !!qc_data)) %>%
-      dplyr::rename_all(~ stringr::str_c(., "_all"))
+      dplyr::rename_with(~ stringr::str_c(., "_all"))
   }
   
   plot_data <- data %>%
     dplyr::select(timestamp, !!var) %>%
-    dplyr::bind_cols(dplyr::select_at(
-      rlang::eval_tidy(qc_data), dplyr::vars(dplyr::contains(var_name))
+    dplyr::bind_cols(dplyr::select(
+      rlang::eval_tidy(qc_data), dplyr::contains(var_name)
     ))
   
   if (!stringr::str_detect(var_name, "_ep")) {
-    plot_data <- dplyr::select_at(
-      plot_data, dplyr::vars(-dplyr::contains("_ep"))
-    )
+    plot_data <- dplyr::select(plot_data, -dplyr::contains("_ep"))
   }
   
   plot_data <- plot_data %>%
@@ -466,19 +459,27 @@ rep_vars <- list(
 cat("Importing data files...")
 
 # Load the Biomet file
-biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
+#biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
+biomet <- readr::read_csv(
+  biomet_input, guess_max = 6000, 
+  col_types = readr::cols(.default = readr::col_guess())
+)
 
 # Add timestamp components
 biomet <- biomet %>% 
-  dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
+  #dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
   add_time_comps()
 
 # Load Biomet file from closest site
-biomet_aux <- read.csv(aux_input, stringsAsFactors = FALSE)
-# Parse timestamp
-biomet_aux <- dplyr::mutate(
-  biomet_aux, timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
+#biomet_aux <- read.csv(aux_input, stringsAsFactors = FALSE)
+biomet_aux <- readr::read_csv(
+  aux_input, guess_max = 6000, 
+  col_types = readr::cols(.default = readr::col_guess())
 )
+# Parse timestamp
+#biomet_aux <- dplyr::mutate(
+#  biomet_aux, timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
+#)
 
 # Initialize QC data frame
 qc_biomet <- dplyr::select(biomet, timestamp)
@@ -510,7 +511,7 @@ auto_flags <- auto_flags %>%
 
 # Give flags QC names
 for (i in seq_along(vars)) {
-  auto_flags[[i]] <- dplyr::rename_all(
+  auto_flags[[i]] <- dplyr::rename_with(
     auto_flags[[i]], ~ stringr::str_c("qc_", names(auto_flags)[i], "_", .)
   )
 }
@@ -536,17 +537,17 @@ for (i in seq_along(all_vars)) {
   var_qc_name <- stringr::str_c(
     "qc_", rlang::as_string(all_vars[[i]]), "_plaus"
   )
-  qc_biomet[, var_qc_name] <- drop_attributes(apply_thr(
+  qc_biomet[, var_qc_name] <- flag_thr(
     dplyr::pull(biomet, !!all_vars[[i]]),
     purrr::pluck(var_attrs, rlang::as_string(all_vars[[i]]), "limits"),
-    flag = "outside"
-  ))
+    rule = "outside"
+  )
 }
 
 
 ### Special potential incoming radiation flags =================================
 
-qc_biomet <- mutate(
+qc_biomet <- dplyr::mutate(
   qc_biomet,
   # Check SW_IN against potential radiation
   qc_sw_in_pot = flag_rad(biomet$sw_in, biomet$sw_in_pot),
@@ -558,13 +559,13 @@ qc_biomet <- mutate(
 ### Special precipitation flags ================================================
 
 p_rain_rh_lim <- biomet %>% 
-  filter(p_rain > 0, !is.na(rh)) %>% 
-  summarize(mean(rh) - 2 * sd(rh)) %>%
-  pluck(1, 1) %>% signif(1)
+  dplyr::filter(p_rain > 0, !is.na(rh)) %>% 
+  dplyr::summarize(mean(rh) - 2 * sd(rh)) %>%
+  purrr::pluck(1, 1) %>% signif(1)
 p_rain_kt_lim <- biomet %>% 
-  filter(p_rain > 0, !is.na(kt)) %>% 
-  summarize(mean(kt) + 2 * sd(kt)) %>%
-  pluck(1, 1) %>% signif(1)
+  dplyr::filter(p_rain > 0, !is.na(kt)) %>% 
+  dplyr::summarize(mean(kt) + 2 * sd(kt)) %>%
+  purrr::pluck(1, 1) %>% signif(1)
 
 qc_biomet <- dplyr::mutate(
   qc_biomet,
@@ -572,15 +573,19 @@ qc_biomet <- dplyr::mutate(
   # - non-rain events are not flagged because no plausible explanation for that
   # - Estevez et al. 2011 thresholds: rh = 80, kt = 0.5
   # - allowing empirical thresholds here due to site differences
-  qc_p_rain_rh = if_else(biomet$p_rain > 0 & biomet$rh < p_rain_rh_lim, 1L, 0L),
-  qc_p_rain_kt = if_else(biomet$p_rain > 0 & biomet$kt > p_rain_kt_lim, 1L, 0L),
+  qc_p_rain_rh = dplyr::if_else(
+    biomet$p_rain > 0 & biomet$rh < p_rain_rh_lim, 1L, 0L
+  ),
+  qc_p_rain_kt = dplyr::if_else(
+    biomet$p_rain > 0 & biomet$kt > p_rain_kt_lim, 1L, 0L
+  ),
   qc_p_rain_lik = combine_flags(qc_p_rain_rh, qc_p_rain_kt),
   # Did nearby site experience similar conditions? (+/- 2 lags)  
-  qc_p_rain_aux = if_else(magrittr::and(
+  qc_p_rain_aux = dplyr::if_else(magrittr::and(
     biomet$p_rain > 0, around(biomet_aux$p_rain, ~ .x == 0, .n = 2, .and = TRUE)
   ), 1L, 0L),
   # Hard flag if unlikely precipitation AND closest site had no rain
-  qc_p_rain_err = if_else(qc_p_rain_lik + qc_p_rain_aux > 1, 2L, 0L) %>%
+  qc_p_rain_err = dplyr::if_else(qc_p_rain_lik + qc_p_rain_aux > 1, 2L, 0L) %>%
     tidyr::replace_na(0L)
 )
 
@@ -595,10 +600,9 @@ qc_biomet <- dplyr::bind_cols(
   flag_var_diffs(biomet, ta, ta_ep, qc_biomet),
   # Only consider daytime differences for incoming rad
   flag_var_diffs(
-    dplyr::mutate_at(
-      biomet, dplyr::vars(sw_in, ppfd_in), 
-      ~ dplyr::if_else(night_pot, NA_real_, .)
-    ), 
+    dplyr::mutate(biomet, dplyr::across(
+      c(sw_in, ppfd_in), ~ dplyr::if_else(night_pot, NA_real_, .x)
+    )), 
     sw_in, ppfd_in, qc_biomet
   )
 )
@@ -611,16 +615,15 @@ cat("Combining flags and plotting results...")
 for (i in seq_along(all_vars)) {
   var_name <- rlang::as_string(all_vars[[i]])
   var_flags <- qc_biomet %>% 
-    dplyr::select_at(
-      dplyr::vars(dplyr::contains(stringr::str_c("_", var_name, "_")))
-    ) %>%
-    dplyr::mutate_all(~ dplyr::if_else(. == 1, 0L, .))
+    dplyr::select(dplyr::contains(stringr::str_c("_", var_name, "_"))) %>%
+    dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
   if (!stringr::str_detect(var_name, "_ep")) {
-    var_flags <- select_at(var_flags, vars(-contains("_ep_")))
+    var_flags <- dplyr::select(var_flags, -dplyr::contains("_ep_"))
   }
   
   # Combine flags, flag isolated points
-  biomet[, str_c("qc_", var_name)] <- flag_around(combine_flags(var_flags), 1)
+  qc_name <- stringr::str_c("qc_", var_name)
+  biomet[, qc_name] <- flag_around(combine_flags(var_flags), 1)
 }
 
 # Plot of all flags for each var
@@ -632,9 +635,9 @@ flag_plots <- all_vars %>%
 
 # How many flagged?
 biomet %>%
-  dplyr::select_at(dplyr::vars(all_of(
+  dplyr::select(dplyr::all_of(
     stringr::str_c("qc_", purrr::map_chr(all_vars, rlang::as_string))
-  ))) %>%
+  )) %>%
   tidyr::pivot_longer(dplyr::everything()) %>%
   dplyr::group_by(name) %>%
   dplyr::filter(value == 2) %>%
@@ -658,14 +661,14 @@ cat("Writing output...")
 
 # Save processed Biomet dataset
 biomet_out <- file.path(path_out, stringr::str_c("biomet_qc_", tag_out, ".csv"))
-write.csv(biomet, biomet_out, row.names = FALSE)
+readr::write_csv(remove_time_comps(biomet, -timestamp), biomet_out)
 
 # Create documentation for processed Biomet output
 biomet_docu <- append(
   settings, 
   list(
     files = c(biomet_input, aux_input),
-    aux_site = md$closest_site[1],
+    aux_site = purrr::pluck(md, "closest_site", 1),
     plaus_lims = purrr::modify(var_attrs, "limits"),
     p_rain_lik = list(kt_lim = p_rain_kt_lim, rh_lim = p_rain_rh_lim)
   )
@@ -678,9 +681,9 @@ sink()
 
 # Save Biomet QC flags datasets
 auto_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_auto_flags_")
-write.csv(dplyr::bind_cols(auto_flags), auto_biomet_out, row.names = FALSE)
+readr::write_csv(dplyr::bind_cols(auto_flags), auto_biomet_out)
 qc_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_flags_")
-write.csv(qc_biomet, qc_biomet_out, row.names = FALSE)
+readr::write_csv(qc_biomet, qc_biomet_out)
 
 # Save one pdf document with all diagnostic/summary plots
 plot_path <- file.path(path_out, paste0("biomet_qc_plots_", tag_out, ".pdf"))
@@ -688,6 +691,14 @@ pdf(plot_path)
 purrr::map(plots, ~ .)
 dev.off()
 
+end_time <- Sys.time()
+elapsed_time <- round(unclass(end_time - start_time), 3)
+
 cat("done.\n")
+cat(
+  "Finished processing in ", elapsed_time, " ", attr(elapsed_time, "units"), 
+  ".\n", sep = ""
+)
+cat("Output located in", path_out, "\n")
 
 # Finished
