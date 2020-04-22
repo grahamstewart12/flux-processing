@@ -272,10 +272,10 @@ for (i in seq_along(combined_lists)) {
   
   if (name %in% c("fluxnet", "st7")) {
     # FLUXNET and stats outputs don't have units
-    write.csv(
+    readr::write_csv(
       combined_lists[[i]],
       file.path(path_out, paste0(name, "_combined_", tag_out, ".csv")),
-      na = "-9999", row.names = FALSE
+      na = "-9999"
     )
   } else {
     openeddy::write_eddy(
@@ -297,18 +297,36 @@ cat("\nPreparing FLUXNET data for further analysis...")
 fluxnet <- combined_lists %>%
   purrr::pluck("fluxnet") %>%
   drop_all_attributes() %>%
-  tibble::as_tibble() %>%
   dplyr::mutate(timestamp = lubridate::ymd_hm(TIMESTAMP_END)) %>%
-  dplyr::select(timestamp, dplyr::everything()) %>%
+  dplyr::relocate(timestamp) %>%
   # Convert all names to lowercase (better for R)
-  dplyr::rename_all(tolower) %>%
+  dplyr::rename_with(tolower) %>%
   # Fix errors caused by duplicated column names
   tibble::as_tibble(.name_repair = "universal") %>%
   # Remove columns that contain nothing (all NA)
   dplyr::select_if(~ !all(is.na(.)))
 
+# Subset necessary data
+fluxnet <- fluxnet %>%
+  # Remove metadata and uncorrected data
+  dplyr::select(
+    -dplyr::starts_with("badm"), -dplyr::starts_with("inst"), 
+    -dplyr::starts_with("custom"), -dplyr::ends_with("method"), 
+    -dplyr::ends_with("uncorr"), -dplyr::matches("stage[[:digit:]]")
+  ) %>%
+  # Remove stats & QC details (this is ultimately pulled from full_output)
+  dplyr::select(
+    -dplyr::ends_with("kid"), -dplyr::ends_with("zcd"), 
+    -dplyr::ends_with("corrdiff"), -dplyr::ends_with("nsr"), 
+    -dplyr::ends_with("ss"), -dplyr::ends_with("itc"), 
+    -dplyr::ends_with("test"), -dplyr::ends_with("median"), 
+    -dplyr::ends_with("p25"), -dplyr::ends_with("p75"), 
+    -dplyr::ends_with("spikes"), -dplyr::ends_with("nrex"), 
+    -dplyr::ends_with("skw"), -dplyr::ends_with("kur")
+  )
+
 # Make sure timestamp forms a regular sequence for the entire year
-fluxnet <- data.frame(
+fluxnet <- tibble::tibble(
   timestamp = create_timesteps(settings$year, 48, shift_by = 30)
 ) %>%
   dplyr::left_join(fluxnet, by = "timestamp")
@@ -318,7 +336,7 @@ cat("Writing FLUXNET data...")
 
 # Save the combined fluxnet files as .csv file
 fn_out <- file.path(path_out, paste0("eddypro_combined_", tag_out, ".csv"))
-write.csv(fluxnet, fn_out, row.names = FALSE)
+readr::write_csv(fluxnet, fn_out)
 
 # Create documentation
 fn_docu <- settings
