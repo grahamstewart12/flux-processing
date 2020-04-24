@@ -26,7 +26,7 @@ start_time <- Sys.time()
 
 # Load the required packages
 suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
-library(lubridate)
+library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
 
 #source("~/Desktop/DATA/Flux/tools/engine/biomet_qc_v2.R")
@@ -386,9 +386,9 @@ plot_flags <- function(data, var, qc_data, geom = c("point", "line")) {
   
   plot_data <- data %>%
     dplyr::select(timestamp, !!var) %>%
-    dplyr::bind_cols(dplyr::select(
-      rlang::eval_tidy(qc_data), dplyr::contains(var_name)
-    ))
+    dplyr::bind_cols(
+      dplyr::select(rlang::eval_tidy(qc_data), dplyr::contains(var_name))
+    )
   
   if (!stringr::str_detect(var_name, "_ep")) {
     plot_data <- dplyr::select(plot_data, -dplyr::contains("_ep"))
@@ -405,7 +405,7 @@ plot_flags <- function(data, var, qc_data, geom = c("point", "line")) {
   if (geom == "point") {
     plot <- plot + ggplot2::geom_point(alpha = 0.8, stroke = 0, na.rm = TRUE)
   } else if (geom == "line") {
-    plot <- plot + ggplot2::geom_line(alpha = 0.8, na.rm = TRUE) 
+    plot <- plot + ggplot2::geom_line(alpha = 0.7, size = 0.5, na.rm = TRUE) 
   }
   
   plot +
