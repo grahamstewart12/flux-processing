@@ -9,11 +9,13 @@
 # X flag_mahalanobis
 # X coalesce_flags
 # X add_time_comps
+# remove_time_comps
 # X drop_attributes
 # around
 # X flag_around
 # replace_real
 # X fill_linear
+# fill_along
 # X detect_fog
 
 # Find the latest version of an output file
