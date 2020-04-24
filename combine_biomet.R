@@ -213,9 +213,6 @@ offset <- biomet %>%
   ) %>%
   as.list()
 
-# Check offsets
-#offset %>% enframe(value = "offset") %>% unnest(offset)
-
 biomet <- dplyr::mutate(
   biomet, 
   ppfd_in = apply_offset(ppfd_in, -offset$ppfd_in),
@@ -234,7 +231,6 @@ frac_ppfd <- biomet %>%
   tidyr::drop_na() %>% 
   dplyr::summarize(sum(sw_in) / sum(ppfd_in)) %>% 
   purrr::pluck(1)
-#frac_ppfd
 
 biomet <- dplyr::mutate(
   biomet,
@@ -257,7 +253,7 @@ biomet <- dplyr::mutate(
 
 # Save the combined Biomet inputs as .csv file
 biomet_out <- file.path(path_out, paste0("biomet_combined_", tag_out, ".csv"))
-write.csv(biomet, biomet_out, row.names = FALSE)
+readr::write_csv(biomet, biomet_out)
 
 # Create documentation for Biomet output
 biomet_docu <- append(
