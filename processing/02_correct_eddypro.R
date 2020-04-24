@@ -98,15 +98,20 @@ md <- purrr::pluck(site_metadata, settings$site)
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
 wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
-path_in <- file.path(wd, "processing_data", "02_combine_eddypro", "output")
+path_in <- file.path(wd, "processing", "01_combine_eddypro")
+
 # Input file - biomet output with QC flags
 biomet_input <- latest_version(path_in, "eddypro_combined")
+
+# Input file - eddypro settings
+ep_settings_input <- latest_version(path_in, "processing")
+# [179] "use_geo_north=0"
 
 # Set tag for creating output file names
 tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Set path for output files
-path_out <- file.path(wd, "processing_data", "03_combine_biomet", "output")
+path_out <- file.path(wd, "processing", "02_correct_eddypro")
 
 # List of vars housed in the biomet system
 biomet_vars <- rlang::exprs(
@@ -171,17 +176,28 @@ if (median(biomet$fch4, na.rm = TRUE) > 1) {
 
 ### Correct wind direction for magnetic declination ============================
 
-# Calculate magnetic declination given location & time
-mag_decl <- purrr::pluck(
-  oce::magneticField(md$lon, md$lat, settings$year + 0.5), "declination"
+mag_decl <- NA
+
+# Read in EddyPro settings
+ep_settings <- readr::read_csv(
+  ep_settings_input, col_types = readr::cols(.default = readr::col_guess())
 )
 
-# Reassign magnetic wind direction, apply declination
-biomet <- dplyr::mutate(
-  biomet,
-  wd_mag = wd,
-  wd = (wd_mag - mag_decl) %% 360
-)
+# Check if geographic north was already used before correcting
+if (sum(ep_settings$use_geo_north) == 0) {
+  
+  # Calculate magnetic declination given location & time
+  mag_decl <- purrr::pluck(
+    oce::magneticField(md$lon, md$lat, settings$year + 0.5), "declination"
+  )
+  
+  # Reassign magnetic wind direction, apply declination
+  biomet <- dplyr::mutate(
+    biomet,
+    wd_mag = wd,
+    wd = (wd_mag - mag_decl) %% 360
+  )
+}
 
 
 ### Combined replicated variables ==============================================

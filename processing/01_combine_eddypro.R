@@ -23,6 +23,52 @@ source("~/Desktop/DATA/Flux/tools/reference/combine_eddypro_control.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
 
+### Helper functions ===========================================================
+
+# Helper function for locating files
+str_subset_eddypro <- function(files) {
+  names <- basename(files)
+  keep <- names %>% 
+    stringr::str_subset("^eddypro_") %>%
+    stringr::str_subset("\\.csv$") %>%
+    # Risky subset to remove "user stats" files from consideration
+    stringr::str_subset("user", negate = TRUE)
+  inds <- which(names %in% keep)
+  files[inds]
+}
+
+read_eddypro <- function(file, timestamp = paste(date, time), ...) {
+  
+  timestamp <- rlang::enexpr(timestamp)
+  
+  # Default: skip = 0, units = TRUE
+  data <- openeddy::read_eddy(file, ...)
+  
+  data %>%
+    tibble::as_tibble(.name_repair = "unique") %>%
+    dplyr::mutate_if(is.factor, as.character) %>%
+    dplyr::mutate(timestamp = lubridate::ymd_hm(!!timestamp)) %>%
+    dplyr::filter(!is.na(timestamp))
+}
+
+read_eddypro_settings <- function(file) {
+  
+  settings <- readr::read_lines(file)
+  
+  settings %>%
+    # Separate names & values
+    purrr::map(stringr::str_split, "=") %>%
+    purrr::flatten() %>%
+    # Remove list headers
+    purrr::discard(~ length(.x) < 2) %>%
+    # Set name as first value in each list item
+    rlang::set_names(purrr::modify(., 1)) %>%
+    # Remove name from list element
+    purrr::modify(2) %>%
+    purrr::map(readr::parse_guess)
+}
+
+
 ### Initialize script settings & documentation =================================
 
 # Set directory where outputs are stored
@@ -45,27 +91,8 @@ path_out <- file.path(wd, "processing_data", "02_combine_eddypro", "output")
 
 ### Load, combine, and save the EddyPro files ==================================
 
-# Helper function for locating files
-str_subset_eddypro <- function(files) {
-  names <- basename(files)
-  keep <- names %>% 
-    stringr::str_subset("^eddypro_") %>%
-    stringr::str_subset("\\.csv$") %>%
-    # Risky subset to remove "user stats" files from consideration
-    stringr::str_subset("user", negate = TRUE)
-  inds <- which(names %in% keep)
-  files[inds]
-}
-
 # Set the lists to hold different types of output files
-lists <- list(
-  full_output = vector("list", length = length(ep_paths)),
-  metadata = vector("list", length = length(ep_paths)),
-  biomet = vector("list", length = length(ep_paths)),
-  fluxnet = vector("list", length = length(ep_paths)),
-  qc_details = vector("list", length = length(ep_paths)),
-  st7 = vector("list", length = length(ep_paths))
-)
+ep_settings <- vector("list", length = length(ep_paths))
 lists <- 1:6 %>%
   purrr::map(~ vector("list", length = length(ep_paths))) %>%
   rlang::set_names(
@@ -74,24 +101,18 @@ lists <- 1:6 %>%
 
 data_files <- vector("list", length = length(ep_paths))
 
-read_eddypro <- function(file, timestamp = paste(date, time), ...) {
-  
-  timestamp <- rlang::enexpr(timestamp)
-  
-  # Default: skip = 0, units = TRUE
-  data <- openeddy::read_eddy(file, ...)
-  
-  data %>%
-    tibble::as_tibble(.name_repair = "unique") %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(timestamp = lubridate::ymd_hm(!!timestamp)) %>%
-    dplyr::filter(!is.na(timestamp))
-}
-
 # Read files into the lists
 for (i in seq_along(ep_paths)) {
   
   cat("Reading files from folder ", basename(ep_paths[i]), ": ", sep = "")
+  
+  # Read EddyPro settings
+  ep_settings[[i]] <- ep_paths[i] %>%
+    list.files(pattern = ".eddypro", full.names = TRUE) %>%
+    read_eddypro_settings() %>% 
+    tibble::as_tibble() %>%
+    dplyr::mutate(dir = ep_dirs[i]) %>%
+    dplyr::relocate(dir)
   
   data_files[[i]] <- ep_paths[i] %>%
     list.files(pattern = ".csv", full.names = TRUE, recursive = TRUE) %>% 
@@ -264,6 +285,12 @@ combined_lists <- combined_lists %>%
 # Write combined data as single .csv files
 
 cat("\nWriting datasets: ")
+
+# Bind settings together and write as a table
+ep_settings_out <- file.path(
+  path_out, paste0("processing_combined_", tag_out, ".csv")
+)
+readr::write_csv(dplyr::bind_rows(ep_settings), ep_settings_out)
 
 for (i in seq_along(combined_lists)) {
   
