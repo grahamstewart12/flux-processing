@@ -10,8 +10,7 @@
 # Output(s):
 
 # Load the required packages
-devtools::load_all("~/Desktop/RESEARCH/fluxtools", quiet = TRUE)
-library(openeddy)
+suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(lubridate)
 library(tidyverse)
 
@@ -79,6 +78,8 @@ path_out <- file.path(wd, "processing_data", "08_flux_qc", "output")
 
 
 ### Load required input data ===================================================
+
+cat("Importing data files.\n")
 
 # EddyPro
 site <- read.csv(site_input, stringsAsFactors = FALSE)
