@@ -63,6 +63,7 @@ path_out <- file.path(wd, "processing_data", "06_footprint", "output")
 ### Load required input data ===================================================
 
 cat("Importing data files.\n")
+
 site <- read.csv(site_input, stringsAsFactors = FALSE)
 
 # Add timestamp components
