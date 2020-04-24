@@ -21,7 +21,7 @@ latest_version <- function(dir, name, ext = ".csv", n = 1) {
   out <- stringr::str_subset(files, as.character(date))
   
   # Choose longest file name if multiple files still remain
-  # TODO allow n > 1
+  # TODO (maybe) allow n > 1
   if (length(out) > 1) out <- dplyr::first(out, stringr::str_length(out))
   paste0(dir, out)
   
