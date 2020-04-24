@@ -10,12 +10,8 @@
 
 # Load the required packages
 devtools::load_all("~/Desktop/RESEARCH/fluxtools")
-library(openeddy)
-library(stringr)
 library(lubridate)
-library(tidyr)
-library(dplyr)
-library(ggplot2)
+library(tidyverse)
 
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 source("~/Desktop/DATA/Flux/tools/engine/daily_averages.R")
@@ -26,15 +22,12 @@ script_init(settings, site_metadata)
 ### Load required input data ===================================================
 
 # EddyPro
-site <- read_eddy(site_input)
-str(site) # check if units loaded properly, names are incorrect
+site <- read.csv(site_input, stringsAsFactors = FALSE)
 
 # Add timestamp components
 site <- site %>% 
-  mutate(
-    timestamp = ymd_hms(timestamp, tz = "Etc/GMT+5"),
-    date = date(timestamp)
-  )
+  dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
+  add_time_comps()
 
 
 ### Variables that must be first computed sub-daily ============================
@@ -42,9 +35,6 @@ site <- site %>%
 # Indicator for thermal stratification/convection (re: Franz2016)
 # - complicated at this site because PT is below sediment interface
 site <- site %>%
-  #select(timestamp, tw, lw_out, wtd) %>%
-  # Water surface temperature
-  mutate(tw_surf = (lw_out / (0.960 * 5.67e-8))^(1 / 4) - 273.15) %>%
   #filter(!is.na(tw), !is.na(tw_surf), tw > 0, tw_surf > 0) %>%
   transmute(
     timestamp = timestamp,
@@ -68,10 +58,10 @@ site <- site %>%
 
 ### Daily aggregation ==========================================================
 
-# Re-create "un-gapfilled" variables
+# Re-create "un-gapfilled" variables - probably not necessary
 site %>% select_at(vars(ends_with("_f"), ends_with("_fmeth"))) %>% names(.)
 clean <- site %>%
-  mutate(
+  dplyr::mutate(
     sw_in = if_else(is.na(sw_in_fmeth), sw_in_f, NA_real_),
     ta = if_else(is.na(ta_fmeth), ta_f, NA_real_),
     vpd = if_else(is.na(vpd_fmeth), vpd_f, NA_real_),
@@ -79,7 +69,7 @@ clean <- site %>%
     ts = if_else(is.na(ts_fmeth), ts_f, NA_real_),
     wtd = if_else(is.na(wtd_fmeth), wtd_f, NA_real_)
   ) %>%
-  select_at(vars(-ends_with("_fmeth"), -ends_with("_fqc")))
+  dplyr::select(-dplyr::ends_with("_fmeth"), -dplyr::ends_with("_fqc"))
   
 # Clean non-gapfilled variables that have available flags
 clean %>% select_at(vars(starts_with("qc_"))) %>% names(.)
@@ -92,7 +82,7 @@ clean <- clean %>%
     fc_paired = if_else(is.na(fch4), NA_real_, fc),
     fch4 = clean(fch4, qc_fch4_final)
   ) %>%
-  select_at(vars(-starts_with("qc_")))
+  dplyr::select(-dplyr::starts_with("qc_"))
 
 # Generate reference list for how variables should be aggregated
 agg_ref <- list(
@@ -114,77 +104,82 @@ agg_ref <- list(
 # Perform aggregation
 # 1. Averages
 daily <- clean %>%
-  select_at(vars(-timestamp, -matches(str_c(agg_ref$sum, collapse = "|")))) %>%
-  group_by(date) %>%
+  dplyr::select(
+    -timestamp, -dplyr::matches(stringr::str_c(agg_ref$sum, collapse = "|"))
+  ) %>%
+  dplyr::group_by(date) %>%
   summarize_all(list(avg = mean), na.rm = TRUE)
 
 # 2. Sums
 daily <- clean %>%
-  select_at(vars(date, matches(str_c(agg_ref$sum, collapse = "|")))) %>%
-  group_by(date) %>%
+  dplyr::select(
+    date, dplyr::matches(stringr::str_c(agg_ref$sum, collapse = "|"))
+  ) %>%
+  dplyr::group_by(date) %>%
   # For sums it is good to know how many missing records
-  summarize_all(list(sum = sum, n = ~length(na.omit(.))), na.rm = TRUE) %>%
+  summarize_all(list(sum = sum, n = ~ length(na.omit(.))), na.rm = TRUE) %>%
   # "Clean" night_sum now since it will be used for diurnal vars
-  mutate(night_sum = na_if(night_sum, 48) %>% na_if(0)) %>%
-  left_join(daily)
+  dplyr::mutate(night_sum = dplyr::na_if(night_sum, 48) %>% dplyr::na_if(0)) %>%
+  dplyr::left_join(daily)
 
 # 3. Day/night averages
 daily <- clean %>%
-  select_at(vars(
-    date, night, matches(str_c(agg_ref$diurnal, collapse = "|")), -ta_ep, -tstar
-  )) %>%
-  group_by(date, night) %>%
-  summarize_all(list(avg = mean), na.rm = TRUE) %>%
-  mutate(night = recode(night, `0` = "day", `1` = "night")) %>%
-  pivot_wider(
-    names_from = night, values_from = c(ends_with("sum"), ends_with("avg"))
+  dplyr::select(
+    date, night, 
+    dplyr::matches(stringr::str_c(agg_ref$diurnal, collapse = "|")), 
+    -ta_ep, -tstar
   ) %>%
-  select_at(vars(-ends_with("_NA"))) %>%
-  ungroup() %>%
-  left_join(daily)
+  dplyr::group_by(date, night) %>%
+  summarize_all(list(avg = mean), na.rm = TRUE) %>%
+  dplyr::mutate(night = dplyr::recode(night, `0` = "day", `1` = "night")) %>%
+  tidyr::pivot_wider(
+    names_from = night, 
+    values_from = c(dplyr::ends_with("sum"), dplyr::ends_with("avg"))
+  ) %>%
+  dplyr::select(-dplyr::ends_with("_NA")) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(daily)
 
 # 4. Detailed stats
 daily <- clean %>%
-  select_at(vars(
-    date, matches(str_c(agg_ref$stats, collapse = "|"))
-  )) %>%
-  group_by(date) %>%
+  dplyr::select(
+    date, dplyr::matches(stringr::str_c(agg_ref$stats, collapse = "|"))
+  ) %>%
+  dplyr::group_by(date) %>%
   summarize_all(list(
-    min = min, max = max, sd = sd, med = median, n = ~length(na.omit(.))
+    min = min, max = max, sd = sd, med = median, n = ~ length(na.omit(.))
   ), na.rm = TRUE) %>%
-  left_join(daily)
+  dplyr::left_join(daily)
 
 # 5. Detailed stats - day/night
 daily <- clean %>%
-  select_at(vars(
-    date, night, matches(str_c(agg_ref$stats, collapse = "|"))
-  )) %>%
-  group_by(date, night) %>%
+  dplyr::select(
+    date, night, dplyr::matches(stringr::str_c(agg_ref$stats, collapse = "|"))
+  ) %>%
+  dplyr::group_by(date, night) %>%
   summarize_all(list(
-    min = min, max = max, sd = sd, med = median, n = ~length(na.omit(.))
+    min = min, max = max, sd = sd, med = median, n = ~ length(na.omit(.))
   ), na.rm = TRUE) %>%
-  mutate(night = recode(night, `0` = "day", `1` = "night")) %>%
-  pivot_wider(
+  dplyr::mutate(night = dplyr::recode(night, `0` = "day", `1` = "night")) %>%
+  tidyr::pivot_wider(
     names_from = night, values_from = c(-"date", -"night")
   ) %>%
-  select_at(vars(-ends_with("_NA"))) %>%
-  ungroup() %>%
-  left_join(daily)
-
-str(daily) # make sure everything is there
+  dplyr::select(-dplyr::ends_with("_NA")) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(daily)
 
 # Convert to day-friendly units
 daily <- daily %>%
   # C fluxes to mg m-2 h-1
-  mutate_at(
-    vars(
-      starts_with("fch4_"), starts_with("fc_"), -contains("_n_"), 
-      -ends_with("_n")
-    ), 
-    ~ . * 12.011 * 3600 / 1000
-  ) %>%
+  dplyr::mutate(dplyr::across(
+      c(
+        dplyr::starts_with("fch4_"), dplyr::starts_with("fc_"), 
+        -dplyr::contains("_n_"), -dplyr::ends_with("_n")
+      ), 
+      ~ . * 12.011 * 3600 / 1000
+  )) %>%
   # C fluxes to mg m-2 d-1 (extrapolate averages)
-  mutate(
+  dplyr::mutate(
     fch4 = fch4_avg * 24,
     fc_day = fc_avg_day * 24 * (1 - night_sum / night_n),
     fc_night = fc_avg_night * 24 * (night_sum / night_n),
@@ -195,7 +190,9 @@ daily <- daily %>%
   )
 
 # Clean up final data set
-daily <- mutate_if(daily, is.numeric, list(~ifelse(!is.finite(.), NA_real_, .)))
+daily <- dplyr::mutate(daily, dplyr::across(
+  is.numeric, list(~ dplyr::ifelse(!is.finite(.), NA_real_, .))
+))
 
 # Check time series of vars
 daily %>%
@@ -209,6 +206,6 @@ daily %>%
 daily_out <- paste0(
   wd, "/09_daily_averages/output/", "daily_", tag_out, ".csv"
 )
-write_eddy(daily, daily_out)
+write.csv(daily, daily_out, row.names = FALSE)
 
 # Finished
