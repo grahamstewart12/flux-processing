@@ -2,14 +2,15 @@
 add_attr <- function(x, attr, values) {
   
   values <- tidyr::replace_na(values, "-")
-  names <- colnames(x)
-  l <- purrr::map2_df(names, values, ~ (x[[.x]] <-`attr<-`(x[[.x]], attr, .y)))
-  names(l) <- names
-  #as.data.frame(l)
-  l
+  
+  x %>% 
+    colnames() %>% 
+    rlang::set_names() %>%
+    purrr::map2_df(values, ~ (x[[.x]] <-`attr<-`(x[[.x]], attr, .y)))
 }
 
 drop_attributes <- function(x, attrs = NULL) {
+  
   if (is.null(attrs)) {
     attributes(x) <- NULL
     x
@@ -22,5 +23,6 @@ drop_attributes <- function(x, attrs = NULL) {
 }
 
 drop_all_attributes <- function(x, attrs = NULL) {
+  
   purrr::modify(x, drop_attributes, attrs = attrs)
 }
