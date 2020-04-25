@@ -25,6 +25,8 @@ source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 # Load functions
 source("~/Desktop/DATA/Flux/tools/engine/functions/read_eddypro.R")
 source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/attributes.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
 
 
 ### Helper functions ===========================================================
@@ -52,7 +54,7 @@ wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
 ep_dirs <- purrr::pluck(
   control, settings$site, as.character(settings$year), "ep_dirs"
 )
-ep_paths <- file.path(wd, "processing_data", "00_eddypro_output", ep_dirs)
+ep_paths <- file.path(wd, "processing", "00_eddypro_output", ep_dirs)
 
 # Load metadata file
 md <- purrr::pluck(site_metadata, settings$site)
@@ -61,7 +63,7 @@ md <- purrr::pluck(site_metadata, settings$site)
 tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Set path for output files
-path_out <- file.path(wd, "processing_data", "02_combine_eddypro", "output")
+path_out <- file.path(wd, "processing", "01_combine_eddypro")
 
 
 ### Load, combine, and save the EddyPro files ==================================
@@ -207,7 +209,7 @@ varnames <- lists_sub %>%
   purrr::map(dplyr::slice, 1) %>%
   purrr::map(unlist, use.names = TRUE) %>%
   purrr::map(dplyr::na_if, "-") %>%
-  purrr::map(~ dplyr::coalesce(., names(.))) %>%
+  purrr::imap(~ dplyr::coalesce(.x, .y)) %>%
   purrr::map(tidyr::replace_na, "-") %>%
   purrr::map(unname)
 units <- lists_sub %>%
@@ -236,17 +238,23 @@ for (i in seq_along(combined_lists)) {
   name <- names(combined_lists)[i]
   cat(name, "...", sep = "")
   
-  combined_lists[[i]] <- combined_lists[[i]] %>% 
-    dplyr::rowwise() %>% 
-    # Number of NA values in each row
-    dplyr::mutate(n_na = sum(is.na(dplyr::c_across(is.numeric)))) %>% 
-    dplyr::group_by(timestamp) %>%
-    # Sort by least number of NAs per timestamp
-    dplyr::arrange(n_na, .by_group = TRUE) %>%
-    # Select the first (i.e. most complete) observation
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(-n_na)
+  # This check is expensive, so only do it if necessary
+  duplicates <- any(duplicated(combined_lists[[i]]$timestamp))
+  
+  if (duplicates) {
+    
+    combined_lists[[i]] <- combined_lists[[i]] %>% 
+      dplyr::rowwise() %>% 
+      # Number of NA values in each row
+      dplyr::mutate(n_na = sum(is.na(dplyr::c_across(is.numeric)))) %>% 
+      dplyr::group_by(timestamp) %>%
+      # Sort by least number of NAs per timestamp
+      dplyr::arrange(n_na, .by_group = TRUE) %>%
+      # Select the first (i.e. most complete) observation
+      dplyr::slice(1) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(-n_na)
+  }
   
   cat("done. ")
 }
@@ -263,7 +271,7 @@ cat("\nWriting datasets: ")
 
 # Bind settings together and write as a table
 ep_settings_out <- file.path(
-  path_out, paste0("processing_combined_", tag_out, ".csv")
+  path_out, "settings", paste0("processing_combined_", tag_out, ".csv")
 )
 readr::write_csv(dplyr::bind_rows(ep_settings), ep_settings_out)
 
@@ -276,13 +284,13 @@ for (i in seq_along(combined_lists)) {
     # FLUXNET and stats outputs don't have units
     readr::write_csv(
       combined_lists[[i]],
-      file.path(path_out, paste0(name, "_combined_", tag_out, ".csv")),
+      file.path(path_out, name, paste0(name, "_combined_", tag_out, ".csv")),
       na = "-9999"
     )
   } else {
     openeddy::write_eddy(
       combined_lists[[i]],
-      file.path(path_out, paste0(name, "_combined_", tag_out, ".csv")),
+      file.path(path_out, name, paste0(name, "_combined_", tag_out, ".csv")),
       col.names = varnames[[i]]
     )
   }
@@ -337,7 +345,9 @@ cat("done.\n")
 cat("Writing FLUXNET data...")
 
 # Save the combined fluxnet files as .csv file
-fn_out <- file.path(path_out, paste0("eddypro_combined_", tag_out, ".csv"))
+fn_out <- file.path(
+  path_out, "eddypro", paste0("eddypro_combined_", tag_out, ".csv")
+)
 readr::write_csv(fluxnet, fn_out)
 
 # Create documentation
