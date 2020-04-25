@@ -13,14 +13,18 @@
 start_time <- Sys.time()
 
 # Load the required packages
-suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
+#suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(openeddy, warn.conflicts = FALSE)
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse, warn.conflicts = FALSE)
 
-# Load the source files
+# Load reference files
 source("~/Desktop/DATA/Flux/tools/reference/combine_eddypro_control.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+
+# Load functions
+source("~/Desktop/DATA/Flux/tools/engine/functions/read_eddypro.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 
 
 ### Helper functions ===========================================================
@@ -37,37 +41,6 @@ str_subset_eddypro <- function(files) {
   files[inds]
 }
 
-read_eddypro <- function(file, timestamp = paste(date, time), ...) {
-  
-  timestamp <- rlang::enexpr(timestamp)
-  
-  # Default: skip = 0, units = TRUE
-  data <- openeddy::read_eddy(file, ...)
-  
-  data %>%
-    tibble::as_tibble(.name_repair = "unique") %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(timestamp = lubridate::ymd_hm(!!timestamp)) %>%
-    dplyr::filter(!is.na(timestamp))
-}
-
-read_eddypro_settings <- function(file) {
-  
-  settings <- readr::read_lines(file)
-  
-  settings %>%
-    # Separate names & values
-    purrr::map(stringr::str_split, "=") %>%
-    purrr::flatten() %>%
-    # Remove list headers
-    purrr::discard(~ length(.x) < 2) %>%
-    # Set name as first value in each list item
-    rlang::set_names(purrr::modify(., 1)) %>%
-    # Remove name from list element
-    purrr::modify(2) %>%
-    purrr::map(readr::parse_guess)
-}
-
 
 ### Initialize script settings & documentation =================================
 
@@ -76,7 +49,9 @@ read_eddypro_settings <- function(file) {
 wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
 
 # Set the folders containing the EddyPro outputs to be combined
-ep_dirs <- purrr::pluck(control, settings$site, settings$year, "ep_dirs")
+ep_dirs <- purrr::pluck(
+  control, settings$site, as.character(settings$year), "ep_dirs"
+)
 ep_paths <- file.path(wd, "processing_data", "00_eddypro_output", ep_dirs)
 
 # Load metadata file
@@ -183,7 +158,7 @@ lists_sub <- lists %>%
 
 # Subset data based on correct calibrations if applicable
 recal <- control %>% 
-  purrr::pluck(settings$site, settings$year, "recal_periods") %>%
+  purrr::pluck(settings$site, as.character(settings$year), "recal_periods") %>%
   purrr::map(lubridate::as_datetime)
 
 if (!all(is.na(recal))) {
