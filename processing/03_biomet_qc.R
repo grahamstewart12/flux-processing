@@ -25,13 +25,19 @@
 start_time <- Sys.time()
 
 # Load the required packages
-suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
+#suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
 
-#source("~/Desktop/DATA/Flux/tools/engine/biomet_qc_v2.R")
+# Load reference files
 source("~/Desktop/DATA/Flux/tools/reference/var_attributes.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+
+# Load functions
+source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/flag.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/latest_version.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 
 
 ### Helper functions ===========================================================
@@ -44,24 +50,30 @@ acf_1 <- function(x) {
     purrr::pluck(2)
 }
 
-flag_thr <- function(x, thr, 
-                     rule = c("higher", "lower", "outside", "between")) {
+tidy_acf <- purrr::compose(
+  broom::tidy, ~ acf(.x, plot = FALSE, na.action = na.pass)
+)
+
+diff2 <- function(x, na.rm = FALSE, replace = 0) {
   
-  rule <- rlang::arg_match(rule)
+  d1 <- x - dplyr::lag(x, 1)
+  d2 <- dplyr::lead(x, 1) - x
   
-  if (rule == "higher") {
-    flag <- dplyr::if_else(x > thr, 2L, 0L)
-  } else if (rule == "lower") {
-    flag <- dplyr::if_else(x < thr, 2L, 0L)
-  } else if (rule == "outside") {
-    thr <- sort(thr)
-    flag <- dplyr::if_else(x < thr[1] | x > thr[2], 2L, 0L)
-  } else if (rule == "between") {
-    thr <- sort(thr)
-    flag <- dplyr::if_else(x > thr[1] & x < thr[2], 2L, 0L)
+  # Don't remove NA if both d1 and d2 are NA
+  if (na.rm) {
+    # First look one further
+    d1_out <- dplyr::if_else(is.na(d1) & !is.na(d2), x - dplyr::lag(x, 1), d1)
+    d2_out <- dplyr::if_else(is.na(d2) & !is.na(d1), dplyr::lead(x, 2) - x, d2)
+    
+    # If still NA, fill with 'replace' value
+    d1_out <- tidyr::replace_na(d1_out, replace[1])
+    d2_out <- tidyr::replace_na(d2_out, replace[1])
+  } else {
+    d1_out <- d1
+    d2_out <- d2
   }
   
-  flag
+  d1_out - d2_out
 }
 
 validate_flags <- function(data, var1, var2) {
@@ -216,7 +228,7 @@ biomet_auto_flags <- function(data, var, p_rain) {
       
       dx_var = sd(dx, na.rm = TRUE),
       
-      acf = acf_1(x)
+      acf = x %>% tidy_acf() %>% purrr::pluck("acf", 2)
     ) %>%
     dplyr::mutate(
       # Sigma test
@@ -326,7 +338,7 @@ flag_var_diffs <- function(data, var1, var2, qc_data, alpha = 0.001) {
   y <- dplyr::pull(data, !!var2)
   
   # Flag differences between vars
-  flag <- flag_mahalanobis(x, y, alpha = alpha)
+  flag <- flag_distance(x, y, alpha = alpha)
   
   # Var is not given diff flag if other var is already flagged
   # - indicates problem is elsewhere
@@ -394,6 +406,23 @@ plot_flags <- function(data, var, qc_data, geom = c("point", "line")) {
     plot_data <- dplyr::select(plot_data, -dplyr::contains("_ep"))
   }
   
+  # Helper function for organizing flags
+  coalesce_flags <- function(data, ..., prefix = "qc_[[:alnum:]]+\\_") {
+    
+    data %>%
+      tibble::as_tibble() %>%
+      tidyr::gather("flag", "value", ...) %>%
+      dplyr::mutate(
+        flag = stringr::str_remove(flag, prefix),
+        value = dplyr::if_else(value > 1, flag, NA_character_)
+      ) %>%
+      tidyr::spread(flag, value) %>%
+      dplyr::mutate(
+        flag = dplyr::coalesce(!!! dplyr::select(., ...)),
+        flag = tidyr::replace_na(flag, "none")
+      )
+  }
+  
   plot_data <- plot_data %>%
     coalesce_flags(-timestamp, -!!var) %>%
     dplyr::filter(flag != "none") %>%
@@ -425,21 +454,20 @@ md <- purrr::pluck(site_metadata, settings$site)
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
 wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
-path_in <- file.path(wd, "processing_data", "03_combine_biomet", "output")
+path_in <- file.path(wd, "processing", "02_correct_eddypro", "data")
 
-# Input file - biomet output with QC flags
-biomet_input <- latest_version(path_in, "biomet_combined")
-# Input file - biomet data from nearby sites
+# Input file
+data_input <- latest_version(path_in)
+# Input file - data from nearby sites
 aux_input <- latest_version(
-  stringr::str_replace(path_in, settings$site, md$closest_site[1]),
-  "biomet_combined"
+  stringr::str_replace(path_in, settings$site, md$closest_site[1])
 )
 
 # Set tag for creating output file names
 tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Set path for output files
-path_out <- file.path(wd, "processing_data", "04_biomet_qc", "output")
+path_out <- file.path(wd, "processing", "03_biomet_qc")
 
 # Set variables to be flagged
 vars <- rlang::exprs(
@@ -458,35 +486,27 @@ rep_vars <- list(
 
 cat("Importing data files...")
 
-# Load the Biomet file
-#biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
-biomet <- readr::read_csv(
-  biomet_input, guess_max = 6000, 
+# Load the data
+data <- readr::read_csv(
+  data_input, guess_max = 6000, 
   col_types = readr::cols(.default = readr::col_guess())
 )
 
 # Add timestamp components
-biomet <- biomet %>% 
-  #dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)) %>%
-  add_time_comps()
+data <- add_time_comps(data)
 
 # Load Biomet file from closest site
-#biomet_aux <- read.csv(aux_input, stringsAsFactors = FALSE)
-biomet_aux <- readr::read_csv(
+aux <- readr::read_csv(
   aux_input, guess_max = 6000, 
   col_types = readr::cols(.default = readr::col_guess())
 )
-# Parse timestamp
-#biomet_aux <- dplyr::mutate(
-#  biomet_aux, timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
-#)
 
 # Initialize QC data frame
-qc_biomet <- dplyr::select(biomet, timestamp)
+qc_biomet <- dplyr::select(data, timestamp)
 
 # Warn if both ta or rh vars are the same
-#biomet %>% filter(ta == ta_ep) %>% summarize(n())
-#biomet %>% filter(rh == rh_ep & rh != 100) %>% summarize(n())
+#data %>% filter(ta == ta_ep) %>% summarize(n())
+#data %>% filter(rh == rh_ep & rh != 100) %>% summarize(n())
 
 cat("done.\n")
 
@@ -497,7 +517,7 @@ cat("Computing automatic sensor flags.\n")
 
 # Compute all auto flags
 auto_flags <- vars %>% 
-  purrr::map(~ biomet_auto_flags(biomet, !!., p_rain)) %>%
+  purrr::map(~ biomet_auto_flags(data, !!., p_rain)) %>%
   rlang::set_names(purrr::map_chr(vars, rlang::as_string))
 
 # Validate flags for analagous sensors
@@ -517,7 +537,7 @@ for (i in seq_along(vars)) {
 }
 
 # Plot all flags for each var
-auto_plots <- purrr::map2(vars, auto_flags, ~ plot_flags(biomet, !!.x, .y))
+auto_plots <- purrr::map2(vars, auto_flags, ~ plot_flags(data, !!.x, .y))
 
 # Add combined flag to QC dataset
 for (i in seq_along(vars)) {
@@ -538,7 +558,7 @@ for (i in seq_along(all_vars)) {
     "qc_", rlang::as_string(all_vars[[i]]), "_plaus"
   )
   qc_biomet[, var_qc_name] <- flag_thr(
-    dplyr::pull(biomet, !!all_vars[[i]]),
+    dplyr::pull(data, !!all_vars[[i]]),
     purrr::pluck(var_attrs, rlang::as_string(all_vars[[i]]), "limits"),
     rule = "outside"
   )
@@ -550,19 +570,19 @@ for (i in seq_along(all_vars)) {
 qc_biomet <- dplyr::mutate(
   qc_biomet,
   # Check SW_IN against potential radiation
-  qc_sw_in_pot = flag_rad(biomet$sw_in, biomet$sw_in_pot),
+  qc_sw_in_pot = flag_rad(data$sw_in, data$sw_in_pot),
   # Check converted PPFD_IN against potential radiation
-  qc_ppfd_in_pot = flag_rad(biomet$sw_in_ppfd, biomet$sw_in_pot)
+  qc_ppfd_in_pot = flag_rad(data$sw_in_ppfd, data$sw_in_pot)
 )
 
 
 ### Special precipitation flags ================================================
 
-p_rain_rh_lim <- biomet %>% 
+p_rain_rh_lim <- data %>% 
   dplyr::filter(p_rain > 0, !is.na(rh)) %>% 
   dplyr::summarize(mean(rh) - 2 * sd(rh)) %>%
   purrr::pluck(1, 1) %>% signif(1)
-p_rain_kt_lim <- biomet %>% 
+p_rain_kt_lim <- data %>% 
   dplyr::filter(p_rain > 0, !is.na(kt)) %>% 
   dplyr::summarize(mean(kt) + 2 * sd(kt)) %>%
   purrr::pluck(1, 1) %>% signif(1)
@@ -574,15 +594,15 @@ qc_biomet <- dplyr::mutate(
   # - Estevez et al. 2011 thresholds: rh = 80, kt = 0.5
   # - allowing empirical thresholds here due to site differences
   qc_p_rain_rh = dplyr::if_else(
-    biomet$p_rain > 0 & biomet$rh < p_rain_rh_lim, 1L, 0L
+    data$p_rain > 0 & data$rh < p_rain_rh_lim, 1L, 0L
   ),
   qc_p_rain_kt = dplyr::if_else(
-    biomet$p_rain > 0 & biomet$kt > p_rain_kt_lim, 1L, 0L
+    data$p_rain > 0 & data$kt > p_rain_kt_lim, 1L, 0L
   ),
   qc_p_rain_lik = combine_flags(qc_p_rain_rh, qc_p_rain_kt),
   # Did nearby site experience similar conditions? (+/- 2 lags)  
   qc_p_rain_aux = dplyr::if_else(magrittr::and(
-    biomet$p_rain > 0, around(biomet_aux$p_rain, ~ .x == 0, .n = 2, .and = TRUE)
+    data$p_rain > 0, around(aux$p_rain, ~ .x == 0, .n = 2, .and = TRUE)
   ), 1L, 0L),
   # Hard flag if unlikely precipitation AND closest site had no rain
   qc_p_rain_err = dplyr::if_else(qc_p_rain_lik + qc_p_rain_aux > 1, 2L, 0L) %>%
@@ -597,10 +617,10 @@ cat("done.\n")
 # TA, RH, SW_IN
 qc_biomet <- dplyr::bind_cols(
   qc_biomet,
-  flag_var_diffs(biomet, ta, ta_ep, qc_biomet),
+  flag_var_diffs(data, ta, ta_ep, qc_biomet),
   # Only consider daytime differences for incoming rad
   flag_var_diffs(
-    dplyr::mutate(biomet, dplyr::across(
+    dplyr::mutate(data, dplyr::across(
       c(sw_in, ppfd_in), ~ dplyr::if_else(night_pot, NA_real_, .x)
     )), 
     sw_in, ppfd_in, qc_biomet
@@ -623,18 +643,18 @@ for (i in seq_along(all_vars)) {
   
   # Combine flags, flag isolated points
   qc_name <- stringr::str_c("qc_", var_name)
-  biomet[, qc_name] <- flag_around(combine_flags(var_flags), 1)
+  data[, qc_name] <- flag_around(combine_flags(var_flags), 1)
 }
 
 # Plot of all flags for each var
 flag_plots <- all_vars %>%
-  purrr::map(~ plot_flags(biomet, !!., qc_biomet, geom = "line")) %>%
+  purrr::map(~ plot_flags(data, !!., qc_biomet, geom = "line")) %>%
   rlang::set_names(
     stringr::str_c(purrr::map_chr(all_vars, rlang::as_label), "_flags")
   )
 
 # How many flagged?
-biomet %>%
+data %>%
   dplyr::select(dplyr::all_of(
     stringr::str_c("qc_", purrr::map_chr(all_vars, rlang::as_string))
   )) %>%
@@ -645,7 +665,7 @@ biomet %>%
 
 # Plot overall flag for each var
 qc_plots <- all_vars %>%
-  purrr::map(~ plot_flags(biomet, !!., geom = "line")) %>%
+  purrr::map(~ plot_flags(data, !!., geom = "line")) %>%
   rlang::set_names(
     stringr::str_c(purrr::map_chr(all_vars, rlang::as_label), "_qc")
   )
@@ -659,40 +679,49 @@ cat("done.\n")
 
 cat("Writing output...")
 
-# Save processed Biomet dataset
-biomet_out <- file.path(path_out, stringr::str_c("biomet_qc_", tag_out, ".csv"))
-readr::write_csv(remove_time_comps(biomet, -timestamp), biomet_out)
+# Save processed dataset
+data_out <- file.path(
+  path_out, "data", stringr::str_c("biomet_qc_", tag_out, ".csv")
+)
+readr::write_csv(remove_time_comps(data, -timestamp), data_out)
 
-# Create documentation for processed Biomet output
-biomet_docu <- append(
+# Create documentation for processed output
+data_docu <- append(
   settings, 
   list(
-    files = c(biomet_input, aux_input),
+    files = c(data_input, aux_input),
     aux_site = purrr::pluck(md, "closest_site", 1),
     plaus_lims = purrr::modify(var_attrs, "limits"),
     p_rain_lik = list(kt_lim = p_rain_kt_lim, rh_lim = p_rain_rh_lim)
   )
 )
-biomet_docu_out <- stringr::str_replace(biomet_out, ".csv", ".txt")
+data_docu_out <- stringr::str_replace(data_out, ".csv", ".txt")
 # Save documentation
-sink(biomet_docu_out)
-biomet_docu
+sink(data_docu_out)
+data_docu
 sink()
 
 # Save Biomet QC flags datasets
-auto_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_auto_flags_")
+auto_biomet_out <- file.path(
+  path_out, "flags", stringr::str_c("biomet_qc_auto_flags_", tag_out, ".csv")
+)
 readr::write_csv(dplyr::bind_cols(auto_flags), auto_biomet_out)
-qc_biomet_out <- stringr::str_replace(biomet_out, "_qc_", "_qc_flags_")
+
+qc_biomet_out <- file.path(
+  path_out, "flags", stringr::str_c("biomet_qc_flags_", tag_out, ".csv")
+)
 readr::write_csv(qc_biomet, qc_biomet_out)
 
 # Save one pdf document with all diagnostic/summary plots
-plot_path <- file.path(path_out, paste0("biomet_qc_plots_", tag_out, ".pdf"))
+plot_path <- file.path(
+  path_out, "plots", paste0("biomet_qc_plots_", tag_out, ".pdf")
+)
 pdf(plot_path)
 purrr::map(plots, ~ .)
 dev.off()
 
 end_time <- Sys.time()
-elapsed_time <- round(unclass(end_time - start_time), 3)
+elapsed_time <- round(unclass(end_time - start_time), 1)
 
 cat("done.\n")
 cat(
