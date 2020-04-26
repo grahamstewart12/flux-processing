@@ -22,8 +22,7 @@ latest_version <- function(dir, name, ext = ".csv", n = 1) {
     stringr::str_sub(-10 - ext_len, -1 - ext_len) %>%
     lubridate::ymd() %>%
     vctrs::vec_sort(direction = "desc") %>%
-    vctrs::vec_chop(list(1:n)) %>%
-    purrr::pluck(1)
+    vctrs::vec_slice(1:n)
   
   out <- stringr::str_subset(files, stringr::str_c(dates, collapse = "|"))
 
