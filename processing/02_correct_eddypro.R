@@ -13,13 +13,21 @@
 
 # Output(s): Combined Biomet file with any additional data added, documentation
 
+start_time <- Sys.time()
+
 # Load the required packages
-suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(lubridate)
 library(tidyverse)
 
-#source("~/Desktop/DATA/Flux/tools/engine/combine_biomet.R")
+# Load reference files
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+
+# Load functions
+source("~/Desktop/DATA/Flux/tools/engine/functions/clean.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/flag.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/latest_version.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 
 
 ### Helper functions ===========================================================
@@ -98,17 +106,17 @@ md <- purrr::pluck(site_metadata, settings$site)
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
 wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
-path_in <- file.path(wd, "processing", "01_combine_eddypro", "eddypro")
+path_in <- file.path(wd, "processing", "01_combine_eddypro")
 
 # Input files
 data_input <- latest_version(file.path(path_in, "eddypro"))
-ep_settings_input <- latest_version(file.path(path_in, "processing"))
+ep_settings_input <- latest_version(file.path(path_in, "settings"))
 
 # Set tag for creating output file names
 tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Set path for output files
-path_out <- file.path(wd, "processing", "02_correct_eddypro", "data")
+path_out <- file.path(wd, "processing", "02_correct_eddypro")
 
 # List of vars housed in the biomet system
 biomet_vars <- rlang::exprs(
@@ -118,6 +126,8 @@ biomet_vars <- rlang::exprs(
 
 
 ### Load & clean up input data =================================================
+
+cat("Importing data files...")
 
 # Read in data
 data <- readr::read_csv(
@@ -137,8 +147,12 @@ data <- data %>%
   dplyr::mutate(qc_biomet_all = flag_biomet_system(.)) %>%
   dplyr::mutate(dplyr::across(c(!!!biomet_vars), ~ clean(.x, qc_biomet_all)))
 
+cat("done.\n")
+
 
 ### Correct units ==============================================================
+
+cat("Applying units corrections...")
 
 # TODO get rid of this once I make sure everything uses the fluxnet output
 # - don't need to correct CH4 units since those vars are taken from full_output
@@ -167,6 +181,8 @@ if (median(data$fch4, na.rm = TRUE) > 1) {
     ), ~ .x / 1000
   ))
 }
+
+cat("done.\n")
 
 
 ### Correct wind direction for magnetic declination ============================
@@ -197,6 +213,8 @@ if (sum(ep_settings$use_geo_north) == 0) {
 
 ### Combined replicated variables ==============================================
 
+cat("Combining replicated variables...")
+
 data <- data %>%
   dplyr::rowwise() %>%
   dplyr::mutate(
@@ -206,8 +224,12 @@ data <- data %>%
   ) %>%
   dplyr::ungroup()
 
+cat("done.\n")
+
 
 ### Correct radiation values for zero-offset ===================================
+
+cat("Correcting radiation for zero-offset...")
 
 # Radiation offset
 offset <- data %>%
@@ -231,8 +253,12 @@ data <- dplyr::mutate(
   sw_out = apply_offset(sw_out, -offset$sw_out)
 )
 
+cat("done.\n")
+
 
 ### Add auxilliary data to main data frame =====================================
+
+cat("Calculating additional variables...")
 
 # Other variables that can be calculated using core data
 
@@ -259,8 +285,12 @@ data <- dplyr::mutate(
   kt = clearness_index(sw_in, sw_in_pot, night_pot)
 )
 
+cat("done.\n")
+
 
 ### Save combined file with documentation ======================================
+
+cat("Writing output...")
 
 # Save the corrected data as a .csv file
 data_out <- file.path(
@@ -281,5 +311,15 @@ data_docu_out <- stringr::str_replace(data_out, ".csv", ".txt")
 sink(data_docu_out)
 data_docu
 sink()
+
+end_time <- Sys.time()
+elapsed_time <- round(unclass(end_time - start_time), 1)
+
+cat("done.\n")
+cat(
+  "Finished processing in ", elapsed_time, " ", attr(elapsed_time, "units"), 
+  ".\n", sep = ""
+)
+cat("Output located in", path_out, "\n")
 
 # Finished
