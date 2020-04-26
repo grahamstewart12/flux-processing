@@ -8,7 +8,7 @@ add_time_comps <- function(data, timestamp = timestamp, offset = 900) {
   timestamp <- rlang::enquo(timestamp)
   
   id_along <- function(x) {
-    rle <- rle(x)
+    rle <- rle(as.vector(x))
     rep(seq_along(rle$lengths), times = rle$lengths)
   }
   
@@ -19,7 +19,6 @@ add_time_comps <- function(data, timestamp = timestamp, offset = 900) {
       week = lubridate::week(!!timestamp - offset),
       date = lubridate::date(!!timestamp - offset),
       day = id_along(date),
-      #day = tidy_rle(date)$id,
       hour = decimal_hour(!!timestamp)
     )
 }
