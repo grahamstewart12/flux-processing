@@ -6,17 +6,23 @@
 
 # References:
 
-# Estévez, J., Gavilán, P., Giráldez, J.V., 2011. Guidelines on validation 
+# Estévez, J., Gavilán, P., & Giráldez, J. V. (2011). Guidelines on validation 
 # procedures for meteorological data from automatic weather stations. Journal of 
-# Hydrology 402, 144–154. https://doi.org/10.1016/j.jhydrol.2011.02.031
+# Hydrology, 402(1), 144–154. https://doi.org/10.1016/j.jhydrol.2011.02.031
 
-# Olson, R.J., Holladay, S.K., Cook, R.B., Falge, E., Baldocchi, D., Gu, L., 
-# 2004. FLUXNET: Database of fluxes, site characteristics, and flux-community 
-# information. Oak Ridge National Laboratory, Oak Ridge, TN. 
+# Olson, R. J., Holladay, S. K., Cook, R. B., Falge, E., Baldocchi, D., & Gu, L. 
+# (2004). FLUXNET: Database of fluxes, site characteristics, and flux-community 
+# information. ORNL/TM-2003/204. Oak Ridge, TN: Oak Ridge National Laboratory. 
 # https://doi.org/10.2172/1184413
 
 # ONEFlux Processing Pipeline
 # https://github.com/AmeriFlux/ONEFlux/blob/master/oneflux_steps/qc_auto/src
+
+# Pastorello, G., Agarwal, D., Papale, D., Samak, T., Trotta, C., Ribeca, A., 
+# et al. (2014). Observational Data Patterns for Time Series Data Quality 
+# Assessment. In 2014 IEEE 10th International Conference on e-Science 
+# (Vol. 1, pp. 271–278). IEEE. https://doi.org/10.1109/eScience.2014.45
+
 
 # Input(s):
 
@@ -25,7 +31,6 @@
 start_time <- Sys.time()
 
 # Load the required packages
-#suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
 
@@ -41,18 +46,6 @@ source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 
 
 ### Helper functions ===========================================================
-
-acf_1 <- function(x) {
-  acf <- acf(x, plot = FALSE, na.action = na.pass)$acf
-  acf %>% 
-    purrr::array_branch() %>% 
-    purrr::flatten_dbl() %>% 
-    purrr::pluck(2)
-}
-
-tidy_acf <- purrr::compose(
-  broom::tidy, ~ acf(.x, plot = FALSE, na.action = na.pass)
-)
 
 diff2 <- function(x, na.rm = FALSE, replace = 0) {
   
@@ -131,6 +124,11 @@ biomet_auto_flags <- function(data, var, p_rain) {
   var_name <- rlang::ensym(var) %>% rlang::as_string()
   var <- rlang::enquo(var)
   p_rain <- rlang::enquo(p_rain)
+  
+  # Helper function for checking time series acf
+  tidy_acf <- purrr::compose(
+    broom::tidy, ~ acf(.x, plot = FALSE, na.action = na.pass)
+  )
   
   cat(var_name, "...", sep = "")
   
@@ -320,18 +318,14 @@ flag_var_diffs <- function(data, var1, var2, qc_data, alpha = 0.001) {
   var1_flags <- qc_data %>% 
     dplyr::select(dplyr::contains(stringr::str_c("_", var1_name, "_"))) %>%
     dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
-  if (!stringr::str_detect(var1_name, "_ep")) {
-    var1_flags <- dplyr::select(var1_flags, -dplyr::contains("_ep_"))
-  }
+  
   qc_var1 <- combine_flags(var1_flags)
   
   # Gather var2 flags
   var2_flags <- qc_data %>% 
     dplyr::select(dplyr::contains(stringr::str_c("_", var2_name, "_"))) %>%
     dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
-  if (!stringr::str_detect(var2_name, "_ep")) {
-    var2_flags <- dplyr::select(var2_flags, -dplyr::contains("_ep_"))
-  }
+  
   qc_var2 <- combine_flags(var2_flags)
   
   x <- dplyr::pull(data, !!var1)
@@ -402,9 +396,11 @@ plot_flags <- function(data, var, qc_data, geom = c("point", "line")) {
       dplyr::select(rlang::eval_tidy(qc_data), dplyr::contains(var_name))
     )
   
-  if (!stringr::str_detect(var_name, "_ep")) {
-    plot_data <- dplyr::select(plot_data, -dplyr::contains("_ep"))
-  }
+  #if (!stringr::str_detect(var_name, "_ep|_bm")) {
+  #  plot_data <- dplyr::select(
+  #    plot_data, -dplyr::contains("_ep"), -dplyr::contains("_bm")
+  #  )
+  #}
   
   # Helper function for organizing flags
   coalesce_flags <- function(data, ..., prefix = "qc_[[:alnum:]]+\\_") {
@@ -471,7 +467,7 @@ path_out <- file.path(wd, "processing", "03_biomet_qc")
 
 # Set variables to be flagged
 vars <- rlang::exprs(
-  ta, ta_ep, pa_ep, rh, ppfd_in, sw_in, sw_out, lw_in, lw_out, g, swc, ts
+  ta_ep, ta_bm, pa, rh_bm, ppfd_in, sw_in, sw_out, lw_in, lw_out, g, swc, ts
 )
 
 # List of vars with reps
@@ -489,16 +485,16 @@ cat("Importing data files...")
 # Load the data
 data <- readr::read_csv(
   data_input, guess_max = 6000, 
-  col_types = readr::cols(.default = readr::col_guess())
+  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 
 # Add timestamp components
 data <- add_time_comps(data)
 
-# Load Biomet file from closest site
+# Load data from closest site
 aux <- readr::read_csv(
   aux_input, guess_max = 6000, 
-  col_types = readr::cols(.default = readr::col_guess())
+  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 
 # Initialize QC data frame
@@ -524,7 +520,7 @@ auto_flags <- vars %>%
 # - can do this for sw_in vs sw_out because same unit NOT same sensor
 auto_flags <- auto_flags %>%
   purrr::list_modify(sw_in2 = purrr::pluck(auto_flags, "sw_in")) %>%
-  validate_flags(ta, ta_ep) %>%
+  validate_flags(ta_ep, ta_bm) %>%
   validate_flags(ppfd_in, sw_in) %>%
   validate_flags(sw_out, sw_in2) %>%
   purrr::list_modify(sw_in2 = NULL)
@@ -579,8 +575,8 @@ qc_biomet <- dplyr::mutate(
 ### Special precipitation flags ================================================
 
 p_rain_rh_lim <- data %>% 
-  dplyr::filter(p_rain > 0, !is.na(rh)) %>% 
-  dplyr::summarize(mean(rh) - 2 * sd(rh)) %>%
+  dplyr::filter(p_rain > 0, !is.na(rh_bm)) %>% 
+  dplyr::summarize(mean(rh_bm) - 2 * sd(rh_bm)) %>%
   purrr::pluck(1, 1) %>% signif(1)
 p_rain_kt_lim <- data %>% 
   dplyr::filter(p_rain > 0, !is.na(kt)) %>% 
@@ -594,7 +590,7 @@ qc_biomet <- dplyr::mutate(
   # - Estevez et al. 2011 thresholds: rh = 80, kt = 0.5
   # - allowing empirical thresholds here due to site differences
   qc_p_rain_rh = dplyr::if_else(
-    data$p_rain > 0 & data$rh < p_rain_rh_lim, 1L, 0L
+    data$p_rain > 0 & data$rh_bm < p_rain_rh_lim, 1L, 0L
   ),
   qc_p_rain_kt = dplyr::if_else(
     data$p_rain > 0 & data$kt > p_rain_kt_lim, 1L, 0L
@@ -617,7 +613,7 @@ cat("done.\n")
 # TA, RH, SW_IN
 qc_biomet <- dplyr::bind_cols(
   qc_biomet,
-  flag_var_diffs(data, ta, ta_ep, qc_biomet),
+  flag_var_diffs(data, ta_ep, ta_bm, qc_biomet),
   # Only consider daytime differences for incoming rad
   flag_var_diffs(
     dplyr::mutate(data, dplyr::across(
@@ -637,9 +633,6 @@ for (i in seq_along(all_vars)) {
   var_flags <- qc_biomet %>% 
     dplyr::select(dplyr::contains(stringr::str_c("_", var_name, "_"))) %>%
     dplyr::mutate(dplyr::across(.fns = ~ dplyr::if_else(.x == 1, 0L, .x)))
-  if (!stringr::str_detect(var_name, "_ep")) {
-    var_flags <- dplyr::select(var_flags, -dplyr::contains("_ep_"))
-  }
   
   # Combine flags, flag isolated points
   qc_name <- stringr::str_c("qc_", var_name)
@@ -686,19 +679,20 @@ data_out <- file.path(
 readr::write_csv(remove_time_comps(data, -timestamp), data_out)
 
 # Create documentation for processed output
-data_docu <- append(
+data_docu <- purrr::prepend(
   settings, 
   list(
     files = c(data_input, aux_input),
     aux_site = purrr::pluck(md, "closest_site", 1),
     plaus_lims = purrr::modify(var_attrs, "limits"),
     p_rain_lik = list(kt_lim = p_rain_kt_lim, rh_lim = p_rain_rh_lim)
-  )
+  ), 
+  before = length(settings)
 )
 data_docu_out <- stringr::str_replace(data_out, ".csv", ".txt")
 # Save documentation
 sink(data_docu_out)
-data_docu
+print(data_docu)
 sink()
 
 # Save Biomet QC flags datasets
@@ -717,7 +711,7 @@ plot_path <- file.path(
   path_out, "plots", paste0("biomet_qc_plots_", tag_out, ".pdf")
 )
 pdf(plot_path)
-purrr::map(plots, ~ .)
+purrr::map(plots, print)
 dev.off()
 
 end_time <- Sys.time()
