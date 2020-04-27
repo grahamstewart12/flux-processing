@@ -81,7 +81,7 @@ clearness_index <- function(sw_in, sw_in_pot, night_pot) {
   dplyr::if_else(night_pot, NA_real_, kt)
 }
 
-flag_biomet_system <- function(data, vars = c(ta, lw_in, lw_out)) {
+flag_biomet_system <- function(data, vars = c(ta_bm, lw_in, lw_out)) {
   
   # Suggested vars chosen using the criteria:
   # 1) not directly dependent, 2) unlikely to have natural runs, 3) not repped
@@ -120,7 +120,7 @@ path_out <- file.path(wd, "processing", "02_correct_eddypro")
 
 # List of vars housed in the biomet system
 biomet_vars <- rlang::exprs(
-  ta, rh, ppfd_in, sw_in, sw_out, lw_in, lw_out, p_rain,
+  ta_bm, rh_bm, ppfd_in, sw_in, sw_out, lw_in, lw_out, p_rain,
   dplyr::matches(c("^ts_|^swc_|^g_"))
 )
 
@@ -132,15 +132,25 @@ cat("Importing data files...")
 # Read in data
 data <- readr::read_csv(
   data_input, guess_max = 6000, 
-  col_types = readr::cols(.default = readr::col_guess())
+  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 
-# Simplify non-replicated variable names (remove "_1_1_1")
-data <- dplyr::rename_with(
-  data, 
-  ~ stringr::str_replace(., "_\\d_1_1", ""),
-  c(dplyr::matches("_\\d_1_1"), -dplyr::matches(c("^ts_|^swc_|^g_"))),
-)
+# Fix names
+data <- data %>%
+  # Simplify non-replicated variable names (remove "_1_1_1")
+  dplyr::rename_with(
+    ~ stringr::str_replace(., "_\\d_1_1", ""),
+    c(dplyr::matches("_\\d_1_1"), -dplyr::matches(c("^ts_|^swc_|^g_"))),
+  ) %>%
+  dplyr::rename(
+    # Only one air pressure var, so remove suffix
+    pa = pa_ep,
+    # Give biomet ta & rh vars a suffix 
+    ta_bm = ta,
+    rh_bm = rh
+    # Switch "official" ta var to ta_ep since it is more reliable
+    #ta = ta_ep
+  )
 
 # Flag/clean system errors indicated by simultaneous runs in biomet vars
 data <- data %>% 
@@ -150,9 +160,9 @@ data <- data %>%
 cat("done.\n")
 
 
-### Correct units ==============================================================
+### Correct names & units ======================================================
 
-cat("Applying units corrections...")
+cat("Applying names & units corrections...")
 
 # TODO get rid of this once I make sure everything uses the fluxnet output
 # - don't need to correct CH4 units since those vars are taken from full_output
@@ -168,7 +178,7 @@ data <- data %>%
     dplyr::starts_with("swc_"), ~ dplyr::if_else(.x > 1, .x / 100, .x)
   )) %>%
   dplyr::mutate(dplyr::across(
-    c(dplyr::starts_with("ts_"), ta, ta_ep), 
+    c(dplyr::starts_with("ts_"), ta_ep, ta_bm), 
     ~ dplyr::if_else(.x > 150, .x - 273.15, .x)
   ))
 
@@ -299,17 +309,17 @@ data_out <- file.path(
 readr::write_csv(data, data_out)
 
 # Create documentation for data output
-data_docu <- append(
+data_docu <- purrr::prepend(
   settings, list(
     files = data_input, mag_decl = mag_decl, frac_ppfd = frac_ppfd, 
     offsets = offset
-  )
+  ), before = length(settings)
 )
 data_docu_out <- stringr::str_replace(data_out, ".csv", ".txt")
 
 # Save documentation
 sink(data_docu_out)
-data_docu
+print(data_docu)
 sink()
 
 end_time <- Sys.time()
