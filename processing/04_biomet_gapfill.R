@@ -4,58 +4,54 @@
 
 # Purpose: 
 
+# References:
+
+# Vuichard, N., Papale, D., 2015. Filling the gaps in meteorological continuous 
+# data measured at FLUXNET sites with ERA-Interim reanalysis. Earth System 
+# Science Data 7, 157–171. https://doi.org/10.5194/essd-7-157-2015
+
+
 # Input(s):
 
 # Output(s):
 
+start_time <- Sys.time()
+
 # Load the required packages
-suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
+#suppressWarnings(devtools::load_all("~/Desktop/RESEARCH/fluxtools"))
 library(REddyProc)
 library(lubridate)
 library(tidyverse)
 # Packages needed but not loaded: solartime, bigleaf, broom
 
+# Load reference files
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 source("~/Desktop/DATA/Flux/tools/reference/var_attributes.R")
 source("~/Desktop/DATA/Flux/tools/reference/gf_control.R")
 
+# Load functions
+source("~/Desktop/DATA/Flux/tools/engine/functions/clean.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/flag.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/latest_version.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
+
 
 ### Helper functions ===========================================================
-
-acf_1 <- function(x) {
-  
-  acf <- acf(x, plot = FALSE, na.action = na.pass)$acf
-  
-  acf %>% 
-    purrr::array_branch() %>% 
-    purrr::flatten_dbl() %>% 
-    purrr::pluck(2)
-}
 
 get_best_lag <- function(y, x, lag.max = 12) {
   
   dy <- y - dplyr::lag(y)
   dx <- x - dplyr::lag(x)
   
-  ccf <- ccf(dx, dy, lag.max = lag.max, na.action = na.pass, plot = FALSE)
-  
-  tbl <- tibble::tibble(
-    lag = ccf %>% 
-      purrr::pluck("lag") %>%
-      purrr::array_branch() %>%
-      purrr::simplify(),
-    acf = ccf %>% 
-      purrr::pluck("acf") %>%
-      purrr::array_branch() %>%
-      purrr::simplify()
+  ccf <- broom::tidy(
+    ccf(dx, dy, lag.max = lag.max, na.action = na.pass, plot = FALSE)
   )
   
-  lag <- tbl %>%
-    dplyr::arrange(desc(acf)) %>%
-    dplyr::slice(1) %>%
-    purrr::pluck("lag")
-  
-  (-lag)
+  ccf %>%
+    dplyr::arrange(dplyr::desc(acf)) %>%
+    purrr::pluck("lag", 1) %>%
+    magrittr::multiply_by(-1)
 }
 
 apply_lag <- function(x, lag) {
@@ -81,9 +77,11 @@ select_clean <- function(data, vars) {
   }
   
   for (i in 2:length(df)) {
-    name <- names(df)[i]
+    name <- rlang::sym(names(df)[i])
     qc_name <- get_qc_var(name)
-    df[, name] <- clean(df[, name], dplyr::pull(data, !!qc_name))
+    df <- dplyr::mutate(
+      df, !!name := clean(!!name, dplyr::pull(data, !!qc_name))
+    )
   }
   
   df
@@ -150,7 +148,6 @@ debias_init <- function(data, aux_data, var, diff = FALSE,
   } else {
     type <- rlang::arg_match(type)
   }
-  #browser()
   
   tbl <- tibble::tibble(
     y = dplyr::pull(data, !!var1),
@@ -239,6 +236,104 @@ debias <- function(data, aux_data, var, fit, diff = FALSE, lag = 0, ctrl) {
     #out <- dplyr::if_else(is.na(tbl$x - dplyr::lag(tbl$x, 1)), NA_real_, out)
   } else {
     out <- coef(fit)[1] + coef(fit)[2] * tbl$x
+  }
+  
+  out
+}
+
+fill_linear <- function(x, n_max = NULL) {
+  
+  # Option for safely returning original vector
+  if (!is.null(n_max)) {
+    if (is.na(n_max) | n_max == 0) return(x)
+  }
+  
+  y <- seq_along(x)
+  out <- approx(y, x, y)$y
+  
+  if (!is.null(n_max)) {
+    x_tmp <- tidyr::replace_na(x, 9999)
+    rl <- rle(c(x_tmp))
+    n <- rep(rl$lengths, times = rl$lengths)
+    out <- dplyr::if_else(n > n_max & is.na(x), NA_real_, out)
+  }
+  
+  out
+}
+
+fill_along <- function(y, x, coef, lag = 0, align = FALSE, prioritize) {
+  
+  # Essentially forecasting/hindcasting, using a secondary variable as reference
+  
+  prioritize <- rlang::arg_match(prioritize, c("fore", "hind", "both"))
+  
+  x <- dplyr::lag(x, lag)
+  dx <- x - dplyr::lag(x)
+  y_lag <- dplyr::lag(y, 1)
+  y_f <- y
+  
+  # Set NA indices and initialize loop
+  na_i <- which(is.na(y) & !is.na(y_lag))
+  n_na <- length(which(is.na(y)))
+  iter <- 0
+  
+  # Fill gaps moving forward in time (i.e. forecast)
+  while (n_na > 0) {
+    y_f[na_i] <- y_lag[na_i] + coef * dx[na_i]
+    
+    y_lag <- dplyr::lag(y_f, 1)
+    
+    na_i <- which(is.na(y_f) & !is.na(y_lag))
+    if (length(which(is.na(y_f))) == n_na) break
+    n_na <- length(which(is.na(y_f)))
+  }
+  
+  dx <- dplyr::lead(x, 1) - x
+  y_lead <- dplyr::lead(y, 1)
+  y_b <- y
+  
+  # Reset NA indices and re-initialize loop
+  na_i <- which(is.na(y) & !is.na(y_lag))
+  n_na <- length(which(is.na(y)))
+  iter <- 0
+  
+  # Fill gaps moving backward in time (i.e. hindcast)
+  while (n_na > 0) {
+    y_b[na_i] <- y_lead[na_i] - coef * dx[na_i]
+    
+    y_lead <- dplyr::lead(y_b, 1)
+    
+    na_i <- which(is.na(y_b) & !is.na(y_lead))
+    if (length(which(is.na(y_b))) == n_na) break
+    n_na <- length(which(is.na(y_b)))
+  }
+  
+  # Interpolation is forecast, hindcast, or average of both
+  if (prioritize == "fore") {
+    out <- dplyr::coalesce(y_f, y_b)
+  } else if (prioritize == "hind") {
+    out <- dplyr::coalesce(y_b, y_f)
+  } else if (prioritize == "both") {
+    out <- purrr::pmap_dbl(list(y_f, y_b), purrr::lift_vd(mean, na.rm = TRUE))
+  }
+  
+  if (align) {
+    gaps <- dplyr::if_else(is.na(y), 1L, 0L)
+    weights <- gaps %>%
+      tidy_rle() %>%
+      dplyr::mutate(yf = y_f, d = dplyr::lead(yf) - yf) %>%
+      dplyr::group_by(id) %>%
+      dplyr::mutate(
+        n = seq_along(values),
+        di = dplyr::last(d) - dplyr::nth(d, -2),
+        pf = di * (n / lengths),
+        pf = dplyr::if_else(values == 1, pf, 0),
+        pf = dplyr::if_else(lengths == 1, 0, pf),
+        pf = tidyr::replace_na(pf, 0)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::pull(pf)
+    out <- out + weights
   }
   
   out
@@ -482,7 +577,7 @@ plan_fill <- function(list, backup, order, ctrl, var) {
     ) %>%
     dplyr::group_by(gap_id) %>%
     dplyr::summarize(dplyr::across(
-      c(-gap, -dplyr::group_cols()), ~ length(na.omit(.))
+      c(-gap, -dplyr::group_cols()), ~ length(na.omit(.x))
     )) %>%
     dplyr::ungroup()
   
@@ -506,6 +601,12 @@ plan_fill <- function(list, backup, order, ctrl, var) {
     )
   
   plan_a <- rep(cover$all, times = cover$gap_len)
+  
+  # Helper function for replacing non-NA values
+  replace_real <- function(x, replace) {
+    #x <- vctrs::vec_cast(x, class(replace))
+    dplyr::if_else(!is.na(x), replace, as.character(x))
+  }
   
   # Point-focused approach (Plan B)
   # Replace non-missing values with the gapfill variable name
@@ -586,14 +687,13 @@ md <- purrr::pluck(site_metadata, settings$site)
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
 wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
-path_in <- file.path(wd, "processing_data", "04_biomet_qc", "output")
+path_in <- file.path(wd, "processing", "03_biomet_qc", "data")
 
 # Input file - biomet output with QC flags
-biomet_input <- latest_version(path_in, "biomet_qc")
-# Input file - biomet data from nearby sites
+data_input <- latest_version(path_in)
+# Input file - biomet data from nearby site
 aux_input <- latest_version(
-  stringr::str_replace(path_in, settings$site, md$closest_site[1]), 
-  "biomet_qc"
+  stringr::str_replace(path_in, settings$site, md$closest_site[1])
 )
 # Input file - processed ERA data for site location
 era_input <- latest_version(
@@ -604,50 +704,57 @@ era_input <- latest_version(
 tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Set path for output files
-path_out <- file.path(wd, "processing_data", "05_biomet_gapfill", "output")
+path_out <- file.path(wd, "processing", "04_biomet_gapfill")
 
 
-### Perform Biomet data initialization =========================================
+### Import and initialize data =================================================
 
-# Load the Biomet file
-cat("Importing Biomet file.\n")
-biomet <- read.csv(biomet_input, stringsAsFactors = FALSE)
+cat("Importing data files...")
+
+# Load the data
+data <- readr::read_csv(
+  data_input, guess_max = 6000, 
+  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
+)
 
 # Add timestamp components, some initialization
-biomet <- biomet %>%
+data <- data %>%
   dplyr::mutate(
-    timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name),
+    # Set timestamp to local time zone to allow alignment with ERA data
+    timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name),
     # Calculate vpd (easier to harmonize than RH)
-    # - can I use ta_ep here? using ta for now since from the same instrument
     vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
-    qc_vpd = combine_flags(qc_rh, qc_ta),
-    qc_vpd_ep = combine_flags(qc_rh, qc_ta_ep)
+    qc_vpd = combine_flags(qc_rh, qc_ta)
+    #qc_vpd_ep = combine_flags(qc_rh, qc_ta_ep)
   ) %>%
   add_time_comps()
+
+# Load the auxilliary data
+aux <- readr::read_csv(
+  aux_input, guess_max = 6000, 
+  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
+)
+
+# Prepare to be used for gap-filling
+aux <- dplyr::mutate(
+  aux,
+  # Set timestamp to local time zone to allow alignment with ERA data
+  timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name),
+  vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
+  qc_vpd = combine_flags(qc_rh, qc_ta)
+)
+
+# Load the ERA data
+era <- readr::read_csv(
+  era_input, col_types = readr::cols(.default = readr::col_guess()), 
+  progress = FALSE
+)
 
 # Create empty list to hold saved plots
 plots <- list()
 
-
-### Import & de-bias auxilliary data to be used in gap-filling =================
-
-cat("Importing auxilliary file.\n")
-# Load the auxilliary file
-aux <- read.csv(aux_input, stringsAsFactors = FALSE)
-# Prepare to be used for gap-filling
-aux <- dplyr::mutate(
-  aux,
-  timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name),
-  # Can I use ta_ep here? using ta for now since from the same instrument
-  vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
-  qc_vpd = combine_flags(qc_rh, qc_ta),
-  # Match appropriate TA vars 
-  !!rlang::sym(md$ta_var) := !!rlang::sym(
-    purrr::pluck(site_metadata, md$closest_site[1], "ta_var")
-  )
-)
-
-cat("De-biasing auxilliary data.\n")
+cat("done.\n")
+cat("De-biasing auxilliary data...")
 
 # Set primary var if options are available (ta, vpd)
 aux_vars <- purrr::list_modify(aux_vars, ta = md$ta_var)
@@ -655,69 +762,69 @@ aux_vars <- purrr::list_modify(aux_vars, ta = md$ta_var)
 # Add lags to control list 
 aux_ctrl <- purrr::list_modify(
   control,
-  g = list(db_lag = get_best_lag(biomet$g, aux$g)),
-  swc = list(db_lag = get_best_lag(biomet$swc, aux$swc)),
-  ts = list(db_lag = get_best_lag(biomet$ts, aux$ts))
+  g = list(db_lag = get_best_lag(data$g, aux$g)),
+  swc = list(db_lag = get_best_lag(data$swc, aux$swc)),
+  ts = list(db_lag = get_best_lag(data$ts, aux$ts))
 )
 #purrr::map_dbl(aux_ctrl, pluck, "db_lag") # check lags
 
 # Select and clean variables to be filled 
-biomet_c <- biomet %>% select_clean(aux_vars) %>% tibble::as_tibble()
+data_c <- data %>% select_clean(aux_vars) %>% tibble::as_tibble()
 aux_c <- aux %>% select_clean(aux_vars) %>% tibble::as_tibble()
 
 # Check harmonization
-plots$aux_vars <- plot_harmonies(biomet_c, aux_c, "aux")
+plots$aux_vars <- plot_harmonies(data_c, aux_c, "aux")
 
 # Fit biomet and aux variables to generate de-biasing coefficients
 aux_fits <- purrr::map(
-  aux_vars, ~ debias_init(biomet_c, aux_c, ., ctrl = aux_ctrl)
+  aux_vars, ~ debias_init(data_c, aux_c, ., ctrl = aux_ctrl)
 )
 
 # De-bias the auxilliary data
 aux_d <- aux_vars %>% 
-  purrr::map2(aux_fits, ~ debias(biomet_c, aux_c, .x, .y, ctrl = aux_ctrl)) %>%
+  purrr::map2(aux_fits, ~ debias(data_c, aux_c, .x, .y, ctrl = aux_ctrl)) %>%
   # Interpolate small gaps
   purrr::imap(~ fill_linear(.x, purrr::pluck(aux_ctrl, .y, "gf_max_i"))) %>%
   rlang::set_names(stringr::str_c(aux_vars, "_d")) %>%
   tibble::as_tibble() %>%
-  dplyr::bind_cols(dplyr::select(biomet_c, timestamp), .)
+  dplyr::bind_cols(dplyr::select(data_c, timestamp), .)
 
 # Check results
 plots$aux_debias <- plot_fill_vars(aux_d, "aux_d")
 
-cat("Writing de-biased auxilliary data.\n")
+cat("done.\n")
+cat("Writing de-biased auxilliary data...")
 
 # Save de-biased auxilliary data with documentation
-aux_d_out <- file.path(path_out, paste0("biomet_aux_db_", tag_out, ".csv"))
-write.csv(aux_d, aux_d_out, row.names = FALSE)
+aux_d_out <- file.path(
+  path_out, "aux", paste0("biomet_aux_db_", tag_out, ".csv")
+)
+readr::write_csv(aux_d, aux_d_out)
 
-# Create documentation for processed Biomet output
-aux_d_docu <- append(
-  settings, list(
-    files = c(biomet_input, aux_input),
-    aux_site = md$closest_site[1],
+# Create documentation for debiased auxilliary output
+aux_d_docu <- purrr::prepend(
+  settings, 
+  list(
+    files = c(data_input, aux_input),
+    aux_site = purrr::pluck(md, "closest_site", 1),
     control = aux_ctrl,
-    d_coefs = purrr::map(aux_fits, pluck, "coefficients")
-  )
+    d_coefs = purrr::map(aux_fits, purrr::pluck, "coefficients")
+  ),
+  before = length(settings)
 )
 aux_d_docu_out <- stringr::str_replace(aux_d_out, ".csv", ".txt")
 # Save documentation
 sink(aux_d_docu_out)
-aux_d_docu
+print(aux_d_docu)
 sink()
 
+cat("done.\n")
 
 ### Data from external sources =================================================
 
-cat("Importing ERA file.\n")
+cat("Harmonizing ERA data...")
 
-# ERA
-era <- read.csv(era_input, stringsAsFactors = FALSE)
-era <- dplyr::mutate(era, timestamp = lubridate::ymd_hms(timestamp, tz = "UTC"))
-
-cat("Harmonizing ERA data.\n")
-
-# Prepare to be used for gap-filling
+# Prepare ERA data to be used for gap-filling
 era_c <- era %>%
   tibble::as_tibble() %>%
   # Note: ts0 = skin, ts1 = 0-7cm, ts2 = 7-28cm, ts3 = 28-100cm
@@ -728,13 +835,13 @@ era_c <- era %>%
   # Match appropriate TA vars 
   dplyr::mutate(!!rlang::sym(md$ta_var) := ta) %>%
   # Subset current year
-  dplyr::right_join(dplyr::select(biomet, timestamp), by = "timestamp") %>% 
+  dplyr::right_join(dplyr::select(data, timestamp), by = "timestamp") %>% 
   tidyr::drop_na()
 
-# Harmonize biomet temporal resolution with ERA data
-biomet_h <- era_c %>%
+# Harmonize temporal resolution with ERA data
+data_h <- era_c %>%
   dplyr::select(timestamp) %>%
-  dplyr::left_join(biomet, by = "timestamp") %>%
+  dplyr::left_join(data, by = "timestamp") %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (doesn't exist in ERA)
   dplyr::mutate(
@@ -744,7 +851,7 @@ biomet_h <- era_c %>%
   # p_rain is a sum, so need to add half-hours before joining
   dplyr::select(-p_rain) %>%
   dplyr::left_join(
-    biomet %>%
+    data %>%
       dplyr::mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
       dplyr::group_by(timestamp) %>%
       dplyr::summarize(p_rain = sum(p_rain)),
@@ -753,30 +860,30 @@ biomet_h <- era_c %>%
 
 # Combine ERA soil var levels to account for changing WTD throughout year
 era_c <- era_c %>%
-  dplyr::bind_cols(dplyr::select(biomet_h, swc, ts)) %>%
+  dplyr::bind_cols(dplyr::select(data_h, swc, ts)) %>%
   dplyr::mutate(dplyr::across(
-    c(swc1, swc2, swc3), ~ apply_lag(., get_best_lag(swc, .))
+    c(swc1, swc2, swc3), ~ apply_lag(.x, get_best_lag(swc, .x))
   )) %>%
   dplyr::mutate(dplyr::across(
-    c(ts1, ts2, ts3), ~ apply_lag(., get_best_lag(ts, .))
+    c(ts1, ts2, ts3), ~ apply_lag(.x, get_best_lag(ts, .x))
   )) %>%
   dplyr::mutate(
-    swc = blend_vars(biomet_h, ., swc, swc2, swc3),
-    ts = blend_vars(biomet_h, ., ts, ts2, ts3)
-)
+    swc = blend_vars(data_h, ., swc, swc2, swc3),
+    ts = blend_vars(data_h, ., ts, ts2, ts3)
+  )
 
 # Set primary var if options are available (ta, vpd)
 era_vars <- purrr::list_modify(era_vars, ta = md$ta_var)
 era_ctrl <- purrr::list_modify(
   control,
-  swc = list(db_lag = get_best_lag(biomet_h$swc, era_c$swc)),
-  ts = list(db_lag = get_best_lag(biomet_h$ts, era_c$ts))
+  swc = list(db_lag = get_best_lag(data_h$swc, era_c$swc)),
+  ts = list(db_lag = get_best_lag(data_h$ts, era_c$ts))
 )
 
-# Harmonize cleaned biomet
-biomet_hc <- era_c %>%
+# Harmonize cleaned data
+data_hc <- era_c %>%
   dplyr::select(timestamp) %>%
-  dplyr::left_join(biomet_c, by = "timestamp") %>%
+  dplyr::left_join(data_c, by = "timestamp") %>%
   # Smooth differenced variables 
   # - balances inflated differences due to sensor noise (not the case in ERA)
   dplyr::mutate(
@@ -786,8 +893,8 @@ biomet_hc <- era_c %>%
   # p_rain is a sum, so need to add half-hours before joining
   dplyr::select(-p_rain) %>%
   dplyr::left_join(
-    biomet_c %>%
-      dplyr::bind_cols(dplyr::select(biomet, sol_ang)) %>%
+    data_c %>%
+      dplyr::bind_cols(dplyr::select(data, sol_ang)) %>%
       dplyr::mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
       dplyr::group_by(timestamp) %>%
       # Solar angle is used to reconstruct time series
@@ -799,13 +906,13 @@ biomet_hc <- era_c %>%
   )
 
 # Plot harmonization
-plots$era_vars <- biomet_hc %>% 
+plots$era_vars <- data_hc %>% 
   dplyr::select(-ppfd_in, -sol_ang_h) %>% 
   plot_harmonies(era_c, "era")
 
 # Calculate average distribution (in half-hrs) of hourly p_rain
 # - needed to re-distribute p_rain when re-constructing original time series
-p_rain_dist <- biomet_c %>%
+p_rain_dist <- data_c %>%
   dplyr::mutate(
     timestamp = lubridate::round_date(timestamp, "hour"),
     p_rain_ind = dplyr::if_else(p_rain > 0, 1, 0)
@@ -817,11 +924,12 @@ p_rain_dist <- biomet_c %>%
   dplyr::summarize(mean(p_rain_hrs, na.rm = TRUE)) %>%
   dplyr::pull()
 
-cat("De-biasing ERA data.\n")
+cat("done.\n")
+cat("De-biasing ERA data...")
 
 # Fit biomet and aux variables to generate de-biasing coefficients
 era_fits <- purrr::map(
-  era_vars, ~ debias_init(biomet_hc, era_c, ., ctrl = era_ctrl)
+  era_vars, ~ debias_init(data_hc, era_c, ., ctrl = era_ctrl)
 )
 
 # Create list with de-biasing coefficients
@@ -829,16 +937,16 @@ era_fits <- purrr::map(
 
 # De-bias the era data
 era_d <- era_vars %>% 
-  purrr::map2(era_fits, ~ debias(biomet_hc, era_c, .x, .y, ctrl = era_ctrl)) %>%
+  purrr::map2(era_fits, ~ debias(data_hc, era_c, .x, .y, ctrl = era_ctrl)) %>%
   rlang::set_names(stringr::str_c(era_vars, "_d")) %>%
   tibble::as_tibble() %>%
-  dplyr::bind_cols(dplyr::select(biomet_hc, timestamp), .)
+  dplyr::bind_cols(dplyr::select(data_hc, timestamp), .)
 
 # Plot results
 plots$era_debias <- plot_fill_vars(era_d, "era_d")
 
 # Get coefficient of ppfd_in/sw_in relationship
-frac_ppfd_era <- biomet_hc %>% 
+frac_ppfd_era <- data_hc %>% 
   dplyr::select(ppfd_in) %>% 
   dplyr::bind_cols(dplyr::select(era_d, sw_in_d)) %>%
   tidyr::drop_na() %>% 
@@ -849,9 +957,9 @@ frac_ppfd_era
 # Reconstruct original time series
 era_df <- era_d %>%
   dplyr::rename_all(str_remove, "_d$") %>%
-  dplyr::bind_cols(dplyr::select(biomet_hc, sol_ang_h)) %>%
+  dplyr::bind_cols(dplyr::select(data_hc, sol_ang_h)) %>%
   dplyr::right_join(
-    dplyr::select(biomet, timestamp, sol_ang), by = "timestamp"
+    dplyr::select(data, timestamp, sol_ang), by = "timestamp"
   ) %>%
   dplyr::mutate(
     # Fill ERA solar angle ahead
@@ -885,37 +993,42 @@ plots$era_reconst <- era_df %>%
   dplyr::select(-ppfd_in_df) %>% 
   plot_fill_vars("era_df")
 
-cat("Writing de-biased ERA data.\n")
+cat("done.\n")
+cat("Writing de-biased ERA data...")
 
 # Save de-biased external data with documentation
-era_df_out <- file.path(path_out, paste0("era_db_reconst", tag_out, ".csv"))
-write.csv(era_df, era_df_out, row.names = FALSE)
+era_df_out <- file.path(
+  path_out, "era", paste0("era_db_reconst", tag_out, ".csv")
+)
+readr::write_csv(era_df, era_df_out)
 
 # Create documentation for processed output
-era_df_docu <- append(
+era_df_docu <- purrr::prepend(
   settings, 
   list(
-    files = c(biomet_input, era_input),
+    files = c(data_input, era_input),
     control = era_ctrl,
-    d_coefs = purrr::map(era_fits, pluck, "coefficients"),
+    d_coefs = purrr::map(era_fits, purrr::pluck, "coefficients"),
     p_rain_dist = p_rain_dist,
     frac_ppfd = frac_ppfd_era
-  )
+  ),
+  before = length(settings)
 )
 era_df_docu_out <- stringr::str_replace(era_df_out, ".csv", ".txt")
 
 # Save documentation
 sink(era_df_docu_out)
-era_df_docu
+print(era_df_docu)
 sink()
 
+cat("done.\n")
 
 ### Prepare for gap-filling ====================================================
 
 # Set primary var if options are available (ta, vpd)
 gf_vars <- purrr::list_modify(gf_vars, ta = md$ta_var)
 
-cat("Generating filled data with MDC algorithm.\n")
+cat("Generating filled data with MDC algorithm...")
 
 # Gather vars that will run MDC
 mdc_names <- gf_vars %>% 
@@ -928,7 +1041,7 @@ mdc_names <- gf_vars %>%
 
 # Initialize REddyProc class (necessary for MDC gap-filling)
 biomet_mdc <- suppressMessages(suppressWarnings(sEddyProc$new(
-  md$site_code, as.data.frame(biomet_c), mdc_names, "timestamp", 
+  md$site_code, as.data.frame(data_c), mdc_names, "timestamp", 
   LatDeg = md$lat, LongDeg = md$lon, TimeZoneHour = md$tz
 )))
 
@@ -941,23 +1054,24 @@ for (i in seq_along(mdc_names)) {
 }
 mdc_results <- biomet_mdc$sExportResults() %>% tibble::as_tibble()
 
-cat("Gathering all fill variables.\n")
+cat("done.\n")
+cat("Gathering all fill variables...")
 
 # Initialize gap-filling data frame
 ta_alt <- purrr::pluck(control, md$ta_var, "gf_backup")
-biomet_f <- biomet_c %>%
+biomet_f <- data_c %>%
   # Add backup variables
   dplyr::mutate(
     !!sym(ta_alt) := clean(
-      dplyr::pull(biomet, !!rlang::sym(ta_alt)), 
-      dplyr::pull(biomet, !!sym(stringr::str_c("qc_", ta_alt)))
+      dplyr::pull(data, !!rlang::sym(ta_alt)), 
+      dplyr::pull(data, !!sym(stringr::str_c("qc_", ta_alt)))
     ),
-    vpd_ep = clean(biomet$vpd_ep, biomet$qc_vpd_ep),
-    ppfd_in_sw = clean(biomet$ppfd_in_sw, biomet$qc_sw_in),
-    sw_in_ppfd = clean(biomet$sw_in_ppfd, biomet$qc_ppfd_in)
+    vpd_ep = clean(data$vpd_ep, data$qc_vpd_ep),
+    ppfd_in_sw = clean(data$ppfd_in_sw, data$qc_sw_in),
+    sw_in_ppfd = clean(data$sw_in_ppfd, data$qc_ppfd_in)
   ) %>%
   dplyr::mutate(
-    dplyr::across(c(ppfd_in_sw, sw_in_ppfd), clean, biomet$qc_biomet_all)
+    dplyr::across(c(ppfd_in_sw, sw_in_ppfd), clean, data$qc_biomet_all)
   ) %>%
   # Add debiased aux variables
   dplyr::left_join(aux_d, by = "timestamp") %>%
@@ -966,15 +1080,16 @@ biomet_f <- biomet_c %>%
   # Add MDC variables
   dplyr::bind_cols(mdc_results)
 
+cat("done.\n")
 
 ### Fill gaps in biomet variables ==============================================
+
+cat("Customizing gap filling based on available data...")
 
 # Organize gapfill variables for each biomet variable
 fill_data <- gf_vars %>% 
   purrr::map(~ gather_fill_data(biomet_f, ., ctrl = era_ctrl)) %>%
   rlang::set_names(gf_vars)
-
-cat("Customizing gap filling based on available data.\n")
 
 # Create reference vector indicating which gapfill variable to use
 gf_meths <- purrr::imap(fill_data, ~ plan_fill(.x, ctrl = era_ctrl, var = .y))
@@ -990,14 +1105,15 @@ gf_qcs <- gf_meths %>%
     )
   ))
 
-cat("Filling gaps.\n")
+cat("done.\n")
+cat("Filling gaps...")
 
 # Coalesce gapfill vars into one final vector
 filled_vars <- purrr::map2(fill_data, gf_meths, gapfill_biomet)
 
 # Add fill vars, methods, and QC variables to main data frame
-biomet <- dplyr::bind_cols(
-  biomet,
+data <- dplyr::bind_cols(
+  data,
   filled_vars %>% 
     tibble::as_tibble() %>% 
     dplyr::rename_with(~ stringr::str_c(., "_f")),
@@ -1010,39 +1126,40 @@ biomet <- dplyr::bind_cols(
     dplyr::rename_with(~ stringr::str_c(., "_fqc"))
 )
 
-cat("Cleaning up results.\n")
+cat("done.\n")
+cat("Cleaning up results...")
 
 # Set nighttime shortwave radiation to 0 and recode fmeth/fqc
 # Used only when potential radiation is 0 (i.e. nighttime) AND sun is not
 #   actively rising or setting, OR when var < 0
-biomet <- biomet %>% 
+data <- data %>% 
   dplyr::mutate(dark = magrittr::and(
     sun_time == "night", lag(sun_time) != "set" & lead(sun_time) != "rise"
   )) %>%
   # Only the ends will be NA, and they are at midnight
   dplyr::mutate(dark = tidyr::replace_na(dark, TRUE)) %>%
   dplyr::mutate(dplyr::across(
-    c(ppfd_in_f, sw_in_f, sw_out_f), ~ dplyr::if_else(dark | . < 0, 0, .)
+    c(ppfd_in_f, sw_in_f, sw_out_f), ~ dplyr::if_else(dark | .x < 0, 0, .x)
   )) %>%
   dplyr::mutate(dplyr::across(
-    c(ppfd_in_fmeth, sw_in_fmeth, sw_out_fmeth), ~ dplyr::if_else(dark, "p", .)
+    c(ppfd_in_fmeth, sw_in_fmeth, sw_out_fmeth), ~ dplyr::if_else(dark, "p", .x)
   )) %>%
   dplyr::mutate(dplyr::across(
-    c(ppfd_in_fqc, sw_in_fqc, sw_out_fqc), ~ dplyr::if_else(dark, 0L, .)
+    c(ppfd_in_fqc, sw_in_fqc, sw_out_fqc), ~ dplyr::if_else(dark, 0L, .x)
   )) %>%
   dplyr::select(-dark)
 
 # Set SWC to its maximum at saturation
-biomet <- dplyr::mutate(
-  biomet, 
+data <- dplyr::mutate(
+  data, 
   swc_f = pmin(swc_f, md$swc_sat), 
   swc_fmeth = dplyr::if_else(swc_f > md$swc_sat, "s", swc_fmeth),
   swc_fqc = dplyr::if_else(swc_f > md$swc_sat, 0L, swc_fqc)
 )
 
 # Recalculate net radiation using filled components
-biomet <- dplyr::mutate(
-  biomet, 
+data <- dplyr::mutate(
+  data, 
   netrad_f = sw_in_f + lw_in_f - (sw_out_f + lw_out_f), 
   netrad_fqc = dplyr::if_else(swc_f > md$swc_sat, 0L, swc_fqc)
 )
@@ -1050,20 +1167,20 @@ biomet <- dplyr::mutate(
 # Fill RH using filled/converted VPD
 ta_gf_var <- stringr::str_c(md$ta_var, "_f")
 # Make sure that both TA vars are filled
-ta_db_fit <- biomet %>%
+ta_db_fit <- data %>%
   dplyr::mutate(
-    !!rlang::sym(ta_alt) := dplyr::pull(biomet, !!rlang::sym(ta_alt))
+    !!rlang::sym(ta_alt) := dplyr::pull(data, !!rlang::sym(ta_alt))
   ) %>%
   dplyr::do(fit = lm(
     !!rlang::sym(ta_alt) ~ !!rlang::sym(ta_gf_var), 
     na.action = na.exclude, data = .
   )) %>%
   purrr::pluck(1, 1)
-biomet <- biomet %>% 
+data <- data %>% 
   dplyr::mutate(
     # Fill alternate TA var
     !!rlang::sym(stringr::str_c(ta_alt, "_f")) := predict(
-      ta_db_fit, dplyr::select(biomet, !!rlang::sym(ta_gf_var))
+      ta_db_fit, dplyr::select(data, !!rlang::sym(ta_gf_var))
     ),
     # Reconstruct RH
     rh_f = dplyr::coalesce(
@@ -1072,68 +1189,78 @@ biomet <- biomet %>%
   )
 
 # Additional variable calculations using gap-filled vars
-biomet <- biomet %>% 
-  dplyr::mutate(
-    # Albedo
-    albedo = sw_out_f / sw_in_f,
-    # Water suface temperature
-    tw_surf = (lw_out_f / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
-    # Potential evapotranspiration
-    et_pot = dplyr::pull(
-      bigleaf::potential.ET(., "ta_ep_f", "pa_ep_f", "netrad_f", "g_f"), ET_pot
-    ),
-    # Likely fog indicator
-    fog = detect_fog(rh_f, lw_in_f, lw_out_f, sw_in_f, p_rain_f)
+data <- dplyr::mutate(
+  data,
+  # Albedo
+  albedo = sw_out_f / sw_in_f,
+  # Water suface temperature
+  tw_surf = (lw_out_f / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
+  # Potential evapotranspiration
+  et_pot = dplyr::pull(
+    bigleaf::potential.ET(., "ta_ep_f", "pa_ep_f", "netrad_f", "g_f"), ET_pot
   )
+  # Likely fog indicator
+  #fog = detect_fog(rh_f, lw_in_f, lw_out_f, sw_in_f, p_rain_f)
+)
 
-cat("Plotting results.\n")
+cat("done.\n")
+cat("Plotting results...")
 
 # Plot results
-plots$gf_results <- biomet %>% 
+plots$gf_results <- data %>% 
   dplyr::select(timestamp, dplyr::ends_with("_f")) %>% 
   plot_fill_vars("var_f")
 
 plots_fmeth <- gf_vars %>% 
-  purrr::map(~ plot_filled(biomet, ., "fmeth")) %>% 
+  purrr::map(~ plot_filled(data, ., "fmeth")) %>% 
   rlang::set_names(stringr::str_c(gf_vars, "_fmeth"))
 plots <- append(plots, plots_fmeth)
 
 plots_fqc <- gf_vars %>% 
-  purrr::map(~ plot_filled(biomet, ., "fqc")) %>% 
+  purrr::map(~ plot_filled(data, ., "fqc")) %>% 
   rlang::set_names(stringr::str_c(gf_vars, "_fqc"))
 plots <- append(plots, plots_fqc)
+
+cat("done.\n")
 
 
 ### Save gap-filled data and all accessory files ===============================
 
-cat("Writing filled data and diagnostic plots.\n")
-# Save full gap-filled Biomet dataset
-biomet_out <- file.path(path_out, paste0("biomet_gf_", tag_out, ".csv"))
-write.csv(biomet, biomet_out, row.names = FALSE)
+cat("Writing filled data and diagnostic plots...")
 
-# Create documentation for processed Biomet output
-biomet_docu <- append(
-  settings, list(
-    files = c(biomet_input, aux_input, era_input),
+# Save full gap-filled dataset
+data_out <- file.path(path_out, "data", paste0("biomet_gf_", tag_out, ".csv"))
+readr::write_csv(data, data_out)
+
+# Create documentation for processed data output
+data_docu <- purrr::prepend(
+  settings, 
+  list(
+    files = c(data_input, aux_input, era_input),
     aux_site = md$closest_site[1],
     vars = gf_vars,
     control = control
-  )
+  ),
+  before = length(settings)
 )
-biomet_docu_out <- stringr::str_replace(biomet_out, ".csv", ".txt")
+data_docu_out <- stringr::str_replace(data_out, ".csv", ".txt")
 # Save documentation
-sink(biomet_docu_out)
-biomet_docu
+sink(data_docu_out)
+print(data_docu)
 sink()
 
 # Save Biomet gapfill details dataset
-biomet_f_out <- stringr::str_replace(biomet_out, "_gf_", "_gf_details_")
-write.csv(biomet_f, biomet_f_out, row.names = FALSE)
+biomet_f_out <- file.path(
+  path_out, "details", paste0("biomet_gf_details_", tag_out, ".csv")
+)
+readr::write_csv(biomet_f, biomet_f_out)
 
 # Save one pdf document with all diagnostic/summary plots
-plot_path <- file.path(path_out, paste0("biomet_gf_plots_", tag_out, ".pdf"))
+plot_path <- file.path(
+  path_out, "plots", paste0("biomet_gf_plots_", tag_out, ".pdf")
+)
 pdf(plot_path)
-purrr::map(plots, ~ .)
+purrr::map(plots, print)
 dev.off()
 
 # Save models and uncertainties
@@ -1148,8 +1275,20 @@ era_fit_df <- era_fits %>%
 fit_df <- dplyr::bind_rows(aux_fit_df, era_fit_df) %>% 
   dplyr::select(var, data, dplyr::everything())
 
-fit_df_out <- file.path(path_out, paste0("biomet_db_fits_", tag_out, ".csv"))
-write.csv(fit_df, fit_df_out, row.names = FALSE)
+fit_df_out <- file.path(
+  path_out, "fits", paste0("biomet_db_fits_", tag_out, ".csv")
+)
+readr::write_csv(fit_df, fit_df_out)
+
+end_time <- Sys.time()
+elapsed_time <- round(unclass(end_time - start_time), 1)
+
+cat("done.\n")
+cat(
+  "Finished processing in ", elapsed_time, " ", attr(elapsed_time, "units"), 
+  ".\n", sep = ""
+)
+cat("Output located in", path_out, "\n")
 
 # Uncertainty something like this
 #biomet_c %>% 
