@@ -148,8 +148,6 @@ data <- data %>%
     # Give biomet ta & rh vars a suffix 
     ta_bm = ta,
     rh_bm = rh
-    # Switch "official" ta var to ta_ep since it is more reliable
-    #ta = ta_ep
   )
 
 # Flag/clean system errors indicated by simultaneous runs in biomet vars
@@ -228,9 +226,9 @@ cat("Combining replicated variables...")
 data <- data %>%
   dplyr::rowwise() %>%
   dplyr::mutate(
-    g = mean(c(g_1_1_1, g_2_1_1, g_3_1_1), na.rm = TRUE),
-    swc = mean(c(swc_1_1_1, swc_2_1_1, swc_3_1_1), na.rm = TRUE),
-    ts = mean(c(ts_1_1_1, ts_2_1_1, ts_3_1_1), na.rm = TRUE)
+    g = mean(c(g_1_1_1, g_2_1_1, g_3_1_1)),
+    swc = mean(c(swc_1_1_1, swc_2_1_1, swc_3_1_1)),
+    ts = mean(c(ts_1_1_1, ts_2_1_1, ts_3_1_1))
   ) %>%
   dplyr::ungroup()
 
