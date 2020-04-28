@@ -467,7 +467,8 @@ path_out <- file.path(wd, "processing", "03_biomet_qc")
 
 # Set variables to be flagged
 vars <- rlang::exprs(
-  ta_ep, ta_bm, pa, rh_bm, ppfd_in, sw_in, sw_out, lw_in, lw_out, g, swc, ts
+  ta_ep, ta_bm, rh_ep, rh_bm, pa, ppfd_in, sw_in, sw_out, lw_in, lw_out, 
+  g, swc, ts
 )
 
 # List of vars with reps
@@ -500,10 +501,6 @@ aux <- readr::read_csv(
 # Initialize QC data frame
 qc_biomet <- dplyr::select(data, timestamp)
 
-# Warn if both ta or rh vars are the same
-#data %>% filter(ta == ta_ep) %>% summarize(n())
-#data %>% filter(rh == rh_ep & rh != 100) %>% summarize(n())
-
 cat("done.\n")
 
 
@@ -518,6 +515,7 @@ auto_flags <- vars %>%
 
 # Validate flags for analagous sensors
 # - can do this for sw_in vs sw_out because same unit NOT same sensor
+# - don't validate rh_ep & rh_bm since typically these are the same
 auto_flags <- auto_flags %>%
   purrr::list_modify(sw_in2 = purrr::pluck(auto_flags, "sw_in")) %>%
   validate_flags(ta_ep, ta_bm) %>%
@@ -547,7 +545,7 @@ for (i in seq_along(vars)) {
 cat("\nFlagging unlikely conditions...")
 
 # Add p_rain to vars list
-all_vars <- append(vars, list(expr(p_rain)))
+all_vars <- append(vars, list(expr(p_rain), expr(ws), expr(wd)))
 
 for (i in seq_along(all_vars)) {
   var_qc_name <- stringr::str_c(
@@ -559,6 +557,19 @@ for (i in seq_along(all_vars)) {
     rule = "outside"
   )
 }
+
+
+### Special wind speed & direction flags =======================================
+
+qc_biomet <- dplyr::mutate(
+  qc_biomet,
+  # Flag implausible maximum wind speed
+  qc_ws_max = flag_thr(data$ws_max, var_attrs$ws$max_limits, "outside"),
+  # Flag implausible wind speed standard deviation
+  qc_ws_sigma = flag_thr(data$u_sigma, var_attrs$ws$sigma_limits, "outside"),
+  # Flag implausible wind direction standard deviation
+  qc_wd_sigma = flag_thr(data$wd_sigma, var_attrs$wd$sigma_limits, "outside")
+)
 
 
 ### Special potential incoming radiation flags =================================
@@ -668,9 +679,21 @@ plots <- append(flag_plots, qc_plots)
 
 cat("done.\n")
 
+
 ### Save output ================================================================
 
 cat("Writing output...")
+
+# Extend flags to linked vars
+data <- dplyr::mutate(
+  data,
+  # WS and Ustar have same parents
+  qc_ustar = qc_ws,
+  # Calculate VPD to be used for gap-filling
+  vpd_bm = bigleaf::rH.to.VPD(rh_bm / 100, ta_ep) * 10,
+  qc_vpd_bm = combine_flags(qc_rh_bm, qc_ta_ep),
+  qc_vpd_ep = combine_flags(qc_rh_ep, qc_ta_ep)
+)
 
 # Save processed dataset
 data_out <- file.path(
