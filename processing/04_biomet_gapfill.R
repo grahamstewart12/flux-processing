@@ -6,9 +6,18 @@
 
 # References:
 
-# Vuichard, N., Papale, D., 2015. Filling the gaps in meteorological continuous 
-# data measured at FLUXNET sites with ERA-Interim reanalysis. Earth System 
-# Science Data 7, 157–171. https://doi.org/10.5194/essd-7-157-2015
+# Franz, D., Koebsch, F., Larmanou, E., Augustin, J., & Sachs, T. (2016). High 
+# net CO2 and CH4 release at a eutrophic shallow lake on a formerly drained fen. 
+# Biogeosciences, 13(10), 3051–3070. https://doi.org/10.5194/bg-13-3051-2016
+
+# Mauder, M., Cuntz, M., Drüe, C., Graf, A., Rebmann, C., Schmid, H. P., et al. 
+# (2013). A strategy for quality and uncertainty assessment of long-term 
+# eddy-covariance measurements. Agricultural and Forest Meteorology, 169, 
+# 122–135. https://doi.org/10.1016/j.agrformet.2012.09.006
+
+# Vuichard, N., & Papale, D. (2015). Filling the gaps in meteorological 
+# continuous data measured at FLUXNET sites with ERA-Interim reanalysis. Earth 
+# System Science Data, 7(2), 157–171. https://doi.org/10.5194/essd-7-157-2015
 
 
 # Input(s):
@@ -232,7 +241,9 @@ debias <- function(data, aux_data, var, fit, diff = FALSE, lag = 0, ctrl) {
   
   # If differences, reconstruct data using time series fill
   if (diff) {
-    out <- fill_along(tbl$y, tbl$x, coef(fit)[2], lag = 0, align = TRUE)
+    out <- fill_along(
+      tbl$y, tbl$x, coef(fit)[2], lag = 0, align = TRUE, prioritize = "fore"
+    )
     #out <- dplyr::if_else(is.na(tbl$x - dplyr::lag(tbl$x, 1)), NA_real_, out)
   } else {
     out <- coef(fit)[1] + coef(fit)[2] * tbl$x
@@ -549,7 +560,7 @@ gather_fill_data <- function(data, var, backup, order, max_i, ctrl) {
 }
 
 plan_fill <- function(list, backup, order, ctrl, var) {
-  
+  #browser()
   # Get information from control list if provided
   if (!missing(ctrl)) {
     backup <- purrr::pluck(ctrl, var, "gf_backup")
@@ -576,9 +587,7 @@ plan_fill <- function(list, backup, order, ctrl, var) {
       gap_len = dplyr::pull(tidy_rle(gap), lengths)
     ) %>%
     dplyr::group_by(gap_id) %>%
-    dplyr::summarize(dplyr::across(
-      c(-gap, -dplyr::group_cols()), ~ length(na.omit(.x))
-    )) %>%
+    dplyr::summarize(dplyr::across(-gap, ~ length(na.omit(.x)))) %>%
     dplyr::ungroup()
   
   cover <- gaps %>%
@@ -623,6 +632,19 @@ plan_fill <- function(list, backup, order, ctrl, var) {
   plan <- dplyr::coalesce(plan_a, plan_b)
   
   plan
+}
+
+gapfill_biomet <- function(fill_data, fmeth) {
+  
+  # This method is MUCH slower than coalescing vectors
+  
+  out <- rep(NA_real_, length(fmeth))
+  for (i in seq_along(fmeth)) {
+    if (is.na(fmeth[i])) next
+    out[i] <- purrr::pluck(fill_data, fmeth[i], i)
+  }
+  
+  out
 }
 
 qc_biomet_fmeth <- function(fmeth, mdc_fqc) {
@@ -717,16 +739,12 @@ data <- readr::read_csv(
   col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 
-# Add timestamp components, some initialization
+# Set timestamp to local time zone to allow alignment with ERA data
 data <- data %>%
   dplyr::mutate(
-    # Set timestamp to local time zone to allow alignment with ERA data
-    timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name),
-    # Calculate vpd (easier to harmonize than RH)
-    vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
-    qc_vpd = combine_flags(qc_rh, qc_ta)
-    #qc_vpd_ep = combine_flags(qc_rh, qc_ta_ep)
+    timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name)
   ) %>%
+  # Add timestamp components
   add_time_comps()
 
 # Load the auxilliary data
@@ -735,13 +753,10 @@ aux <- readr::read_csv(
   col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 
-# Prepare to be used for gap-filling
+# Set timestamp to local time zone
 aux <- dplyr::mutate(
   aux,
-  # Set timestamp to local time zone to allow alignment with ERA data
-  timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name),
-  vpd = bigleaf::rH.to.VPD(rh / 100, ta) * 10,
-  qc_vpd = combine_flags(qc_rh, qc_ta)
+  timestamp = lubridate::force_tz(timestamp, tzone = md$tz_name)
 )
 
 # Load the ERA data
@@ -755,9 +770,6 @@ plots <- list()
 
 cat("done.\n")
 cat("De-biasing auxilliary data...")
-
-# Set primary var if options are available (ta, vpd)
-aux_vars <- purrr::list_modify(aux_vars, ta = md$ta_var)
 
 # Add lags to control list 
 aux_ctrl <- purrr::list_modify(
@@ -827,13 +839,13 @@ cat("Harmonizing ERA data...")
 # Prepare ERA data to be used for gap-filling
 era_c <- era %>%
   tibble::as_tibble() %>%
+  # Make copies for vars with multiple versions 
+  dplyr::mutate(ta_ep = ta, ta_bm = ta, vpd_ep = vpd, vpd_bm = vpd) %>%
   # Note: ts0 = skin, ts1 = 0-7cm, ts2 = 7-28cm, ts3 = 28-100cm
   dplyr::select(
-    timestamp, ta, pa_ep, sw_in, sw_out, lw_in, lw_out, vpd, p_rain, 
-    swc1, swc2, swc3, ts1, ts2, ts3
+    timestamp, ta_ep, ta_bm, vpd_ep, vpd_bm, pa, sw_in, sw_out, lw_in, lw_out, 
+    p_rain, swc1, swc2, swc3, ts1, ts2, ts3, ws
   ) %>%
-  # Match appropriate TA vars 
-  dplyr::mutate(!!rlang::sym(md$ta_var) := ta) %>%
   # Subset current year
   dplyr::right_join(dplyr::select(data, timestamp), by = "timestamp") %>% 
   tidyr::drop_na()
@@ -873,7 +885,6 @@ era_c <- era_c %>%
   )
 
 # Set primary var if options are available (ta, vpd)
-era_vars <- purrr::list_modify(era_vars, ta = md$ta_var)
 era_ctrl <- purrr::list_modify(
   control,
   swc = list(db_lag = get_best_lag(data_h$swc, era_c$swc)),
@@ -1025,9 +1036,6 @@ cat("done.\n")
 
 ### Prepare for gap-filling ====================================================
 
-# Set primary var if options are available (ta, vpd)
-gf_vars <- purrr::list_modify(gf_vars, ta = md$ta_var)
-
 cat("Generating filled data with MDC algorithm...")
 
 # Gather vars that will run MDC
@@ -1058,15 +1066,9 @@ cat("done.\n")
 cat("Gathering all fill variables...")
 
 # Initialize gap-filling data frame
-ta_alt <- purrr::pluck(control, md$ta_var, "gf_backup")
 biomet_f <- data_c %>%
   # Add backup variables
   dplyr::mutate(
-    !!sym(ta_alt) := clean(
-      dplyr::pull(data, !!rlang::sym(ta_alt)), 
-      dplyr::pull(data, !!sym(stringr::str_c("qc_", ta_alt)))
-    ),
-    vpd_ep = clean(data$vpd_ep, data$qc_vpd_ep),
     ppfd_in_sw = clean(data$ppfd_in_sw, data$qc_sw_in),
     sw_in_ppfd = clean(data$sw_in_ppfd, data$qc_ppfd_in)
   ) %>%
@@ -1120,7 +1122,7 @@ data <- dplyr::bind_cols(
   gf_meths %>% 
     tibble::as_tibble() %>% 
     dplyr::rename_with(~ stringr::str_c(., "_fmeth")) %>% 
-    dplyr::mutate(dplyr::across(.fns = na_if, "x")),
+    dplyr::mutate(dplyr::across(.fns = ~ dplyr::na_if(.x, "x"))),
   gf_qcs %>% 
     tibble::as_tibble() %>% 
     dplyr::rename_with(~ stringr::str_c(., "_fqc"))
@@ -1160,48 +1162,38 @@ data <- dplyr::mutate(
 # Recalculate net radiation using filled components
 data <- dplyr::mutate(
   data, 
-  netrad_f = sw_in_f + lw_in_f - (sw_out_f + lw_out_f), 
-  netrad_fqc = dplyr::if_else(swc_f > md$swc_sat, 0L, swc_fqc)
+  netrad_f = sw_in_f + lw_in_f - (sw_out_f + lw_out_f)
 )
 
 # Fill RH using filled/converted VPD
-ta_gf_var <- stringr::str_c(md$ta_var, "_f")
-# Make sure that both TA vars are filled
-ta_db_fit <- data %>%
-  dplyr::mutate(
-    !!rlang::sym(ta_alt) := dplyr::pull(data, !!rlang::sym(ta_alt))
-  ) %>%
-  dplyr::do(fit = lm(
-    !!rlang::sym(ta_alt) ~ !!rlang::sym(ta_gf_var), 
-    na.action = na.exclude, data = .
-  )) %>%
-  purrr::pluck(1, 1)
-data <- data %>% 
-  dplyr::mutate(
-    # Fill alternate TA var
-    !!rlang::sym(stringr::str_c(ta_alt, "_f")) := predict(
-      ta_db_fit, dplyr::select(data, !!rlang::sym(ta_gf_var))
-    ),
-    # Reconstruct RH
-    rh_f = dplyr::coalesce(
-      clean(rh, qc_rh), bigleaf::VPD.to.rH(vpd_f / 10, ta_f) * 100
-    )
-  )
-
-# Additional variable calculations using gap-filled vars
 data <- dplyr::mutate(
   data,
-  # Albedo
-  albedo = sw_out_f / sw_in_f,
-  # Water suface temperature
-  tw_surf = (lw_out_f / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
-  # Potential evapotranspiration
-  et_pot = dplyr::pull(
-    bigleaf::potential.ET(., "ta_ep_f", "pa_ep_f", "netrad_f", "g_f"), ET_pot
+  rh_ep_f = dplyr::coalesce(
+    clean(rh_ep, qc_rh_ep), bigleaf::VPD.to.rH(vpd_ep_f / 10, ta_ep_f) * 100
+  ),
+  rh_bm_f = dplyr::coalesce(
+    clean(rh_bm, qc_rh_bm), bigleaf::VPD.to.rH(vpd_bm_f / 10, ta_ep_f) * 100
   )
-  # Likely fog indicator
-  #fog = detect_fog(rh_f, lw_in_f, lw_out_f, sw_in_f, p_rain_f)
 )
+
+# Additional variable calculations using gap-filled vars
+data <- data %>%
+  dplyr::mutate(s = 0) %>%
+  dplyr::mutate(
+    # Nighttime (Mauder et al. 2013 definition; overwrites original)
+    night = sw_in_f <= 20,
+    # Albedo
+    albedo = sw_out_f / sw_in_f,
+    # Water suface temperature (Stefan-Boltzmann law; Franz et al. 2016)
+    tw_surf = (lw_out_f / (0.960 * 5.67e-8))^(1 / 4) - 273.15,
+    # Potential evapotranspiration (Priestley & Taylor 1972)
+    et_pot = as.data.frame(.) %>% 
+      bigleaf::potential.ET("ta_ep_f", "pa_f", "netrad_f", "g_f", "s") %>%
+      dplyr::pull(ET_pot)
+    # Likely fog indicator
+    #fog = detect_fog(rh_f, lw_in_f, lw_out_f, sw_in_f, p_rain_f)
+  ) %>%
+  dplyr::select(-s)
 
 cat("done.\n")
 cat("Plotting results...")
@@ -1228,9 +1220,23 @@ cat("done.\n")
 
 cat("Writing filled data and diagnostic plots...")
 
+# Set "official" vars
+data <- dplyr::mutate(
+  data,
+  # Air temperature (from CO2 gas analyzer)
+  ta = ta_ep,
+  ta_f = ta_ep_f,
+  # Relative humidity (from Biomet)
+  rh = rh_bm,
+  rh_f = rh_bm_f,
+  # Vapor pressure deficit (calculated using "official" TA & RH)
+  vpd = vpd_bm,
+  vpd_f = vpd_bm_f
+)
+
 # Save full gap-filled dataset
 data_out <- file.path(path_out, "data", paste0("biomet_gf_", tag_out, ".csv"))
-readr::write_csv(data, data_out)
+readr::write_csv(remove_time_comps(data, -timestamp), data_out)
 
 # Create documentation for processed data output
 data_docu <- purrr::prepend(
