@@ -44,6 +44,9 @@ potential_radiation <- function(timestamp, md) {
 
 sun_position <- function(timestamp, md) {
   
+  # solartime function gets tz from timestamp, so need to encode attribute
+  timestamp <- lubridate::force_tz(timestamp, md$tz_name)
+  
   sun_pos <- solartime::computeSunPosition(timestamp, md$lat, md$lon)
   
   sun_pos %>% 
@@ -54,7 +57,9 @@ sun_position <- function(timestamp, md) {
 apply_offset <- function(x, offset) {
   
   # Do this safely - don't accidentally apply offsets twice
-  if (!is.null(attr(x, "offset"))) stop("Offset has already been applied.")
+  if (!is.null(attr(x, "offset"))) {
+    stop("Offset has already been applied.")
+  } 
   
   out <- x + offset
   attr(out, "offset") <- offset
