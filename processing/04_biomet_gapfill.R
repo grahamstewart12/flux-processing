@@ -719,7 +719,7 @@ aux_input <- latest_version(
 )
 # Input file - processed ERA data for site location
 era_input <- latest_version(
-  file.path("~/Desktop", "DATA", "Flux", "JLL", "all", "output"), "era_proc"
+  file.path("~/Desktop", "DATA", "Flux", "JLL", "all", "era"), "era_proc"
 )
 
 # Set tag for creating output file names
@@ -1236,7 +1236,11 @@ data <- dplyr::mutate(
 
 # Save full gap-filled dataset
 data_out <- file.path(path_out, "data", paste0("biomet_gf_", tag_out, ".csv"))
-readr::write_csv(remove_time_comps(data, -timestamp), data_out)
+data %>%
+  remove_time_comps(-timestamp) %>%
+  # Force timestamp back to UTC for data storage
+  dplyr::mutate(timestamp = lubridate::force_tz(timestamp, "UTC")) %>%
+  readr::write_csv(data_out)
 
 # Create documentation for processed data output
 data_docu <- purrr::prepend(
@@ -1259,7 +1263,10 @@ sink()
 biomet_f_out <- file.path(
   path_out, "details", paste0("biomet_gf_details_", tag_out, ".csv")
 )
-readr::write_csv(biomet_f, biomet_f_out)
+biomet_f %>%
+  # Force timestamp back to UTC for data storage
+  dplyr::mutate(timestamp = lubridate::force_tz(timestamp, "UTC")) %>%
+  readr::write_csv(biomet_f_out)
 
 # Save one pdf document with all diagnostic/summary plots
 plot_path <- file.path(
