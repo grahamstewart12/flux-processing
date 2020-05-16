@@ -4,12 +4,18 @@ read_eddypro <- function(file, timestamp = paste(date, time), ...) {
   timestamp <- rlang::enexpr(timestamp)
   
   # Default: skip = 0, units = TRUE
-  data <- openeddy::read_eddy(file, ...)
+  data <- openeddy::read_eddy(file, ..., as.is = TRUE)
+  
+  orders <- c("YmdHM", "YmdHMS", "mdyHM", "mdyHMS")
   
   data %>%
     tibble::as_tibble(.name_repair = "unique") %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(timestamp = lubridate::ymd_hm(!!timestamp)) %>%
+    # This drops attributes
+    #dplyr::mutate(dplyr::across(is.factor, as.character)) %>%
+    dplyr::mutate(
+      timestamp = lubridate::parse_date_time(!!timestamp, orders = orders)
+    ) %>%
+    # Only reason timestamp doesn't parse is if data is corrupt - remove
     dplyr::filter(!is.na(timestamp))
 }
 
