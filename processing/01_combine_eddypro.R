@@ -23,10 +23,10 @@ source("~/Desktop/DATA/Flux/tools/reference/combine_eddypro_control.R")
 source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
 # Load functions
-source("~/Desktop/DATA/Flux/tools/engine/functions/read_eddypro.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 source("~/Desktop/DATA/Flux/tools/engine/functions/attributes.R")
 source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/read_eddypro.R")
+source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
 
 
 ### Helper functions ===========================================================
@@ -54,7 +54,7 @@ wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
 ep_dirs <- purrr::pluck(
   control, settings$site, as.character(settings$year), "ep_dirs"
 )
-ep_paths <- file.path(wd, "processing", "00_eddypro_output", ep_dirs)
+ep_paths <- file.path(wd, "processing", "00_raw_output", "eddypro", ep_dirs)
 
 # Load metadata file
 md <- purrr::pluck(site_metadata, settings$site)
@@ -365,7 +365,7 @@ fn_docu
 sink()
 
 end_time <- Sys.time()
-elapsed_time <- round(unclass(end_time - start_time), 3)
+elapsed_time <- round(unclass(end_time - start_time), 1)
 
 cat("done.\n")
 cat(
