@@ -12,10 +12,24 @@
 # forest ecosystems. Biogeosciences, 5(2), 433–450. 
 # https://doi.org/10.5194/bg-5-433-2008
 
+# Hsieh, C.-I., Katul, G., & Chi, T. (2000). An approximate analytical model for
+# footprint estimation of scalar fluxes in thermally stratified atmospheric 
+# flows. Advances in Water Resources, 23(7), 765–772. 
+# https://doi.org/10.1016/S0309-1708(99)00042-1
+
 # Kljun, N., Calanca, P., Rotach, M. W., & Schmid, H. P. (2015). A simple 
 # two-dimensional parameterisation for Flux Footprint Prediction (FFP). 
 # Geoscientific Model Development, 8(11), 3695–3713. 
 # https://doi.org/10.5194/gmd-8-3695-2015
+
+# Kormann, R., & Meixner, F. X. (2001). An Analytical Footprint Model For 
+# Non-Neutral Stratification. Boundary-Layer Meteorology, 99(2), 207–224. 
+# https://doi.org/10.1023/A:1018991015119
+
+# Leclerc, M. Y., & Foken, T. (2014). Footprints in Micrometeorology and 
+# Ecology. Berlin Heidelberg: Springer-Verlag. 
+# https://doi.org/10.1007/978-3-642-54545-0
+
 
 
 # Input(s):
@@ -23,7 +37,7 @@
 # Output(s):
 
 # Load the required packages
-devtools::load_all("~/R Projects/footprints")
+devtools::load_all("~/R Projects/footprints", quiet = TRUE)
 library(progress)
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
@@ -122,6 +136,7 @@ noaa <- noaa %>%
 data <- data %>%
   # Roughness parameters
   dplyr::mutate(
+    zm = md$tower_height,
     zd = md$displacement,
     zo = md$roughness_length
   ) %>%
@@ -132,7 +147,9 @@ data <- data %>%
   # NOAA (already interpolated)
   dplyr::left_join(noaa, by = "timestamp") %>%
   # Set primary BLH variable (ERA, since at finer spatial & temporal res)
-  dplyr::mutate(blh = blh_era)
+  dplyr::mutate(blh = blh_era) %>%
+  # Force time zone back to UTC
+  dplyr::mutate(timestamp = lubridate::force_tz(timestamp, "UTC"))
 
 
 ### Calculate 1-D footprints (fetch lengths) ===================================
@@ -174,16 +191,32 @@ if (control$fetch) {
 
 if (control$fp) {
   
-  # Select model function
+  # Select model function and parameters
   model_ref <- list(
-    # H00 doesn't need any extra vars; timestamp satisfies dplyr::all_of()
-    H00 = list(fun = calc_footprint_hsieh, vars = "timestamp"),
-    KM01 = list(fun = calc_footprint_kormann, vars = "ws"),
-    K15 = list(fun = calc_footprint_kljun, vars = "blh")
+    H00 = list(
+      fun = calc_footprint_hsieh, 
+      vars = c("ustar", "mo_length", "v_sigma", "zo")
+    ),
+    KM01 = list(
+      fun = calc_footprint_kormann, 
+      vars = c("ws", "ustar", "mo_length", "v_sigma")
+    ),
+    K15 = list(
+      fun = calc_footprint_kljun, 
+      vars = c("ustar", "mo_length", "v_sigma", "blh", "zo")
+    )
   )
-  fp_fun <- purrr::pluck(model_ref, control$fp_model, "fun")
   
-  # See references for description of models
+  model_ref <- purrr::pluck(model_ref, control$fp_model)
+  
+  # Add WS to model vars if specified
+  if (control$fp_model == "K15" & control$use_ws) {
+    model_ref <- purrr::list_merge(model_ref, vars = "ws")
+  }
+  
+  fp_fun <- purrr::pluck(model_ref, "fun")
+  
+  # (See references for description of models)
   
   # Create new folder for output files
   fp_out <- file.path(
@@ -199,12 +232,14 @@ if (control$fp) {
   data_fp <- data %>% 
     # Filter out erroneous wind records
     dplyr::filter(qc_ws == 0, qc_wd == 0) %>%
-    dplyr::select(
-      timestamp, wd, ustar, mo_length, v_sigma, zd, zo,
-      # Add model-specific vars
-      dplyr::all_of(purrr::pluck(model_ref, control$fp_model, "vars"))
-    ) %>%
+    # All models need zm, zd, and wd
+    dplyr::select(timestamp, zm, zd, wd, dplyr::all_of(model_ref$vars)) %>%
     tidyr::drop_na()
+  
+  # Copy data into list (easier to access in footprint loop)
+  data_fp_list <- data_fp %>%
+    dplyr::select(-timestamp) %>%
+    as.list()
   
   # Set up grid
   grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
@@ -226,43 +261,29 @@ if (control$fp) {
   # Write grid to file
   purrr::imap(
     purrr::list_modify(grid, aoi = aoi_grid), 
-    ~ write_matrix(.x, file.path(fp_out, "grid", .y), trunc = NA)
+    ~ write_matrix(
+      .x, file.path(fp_out, "grid", .y), trunc = NA, compress = FALSE
+    )
   )
   
-  # Calculate footprints, create raster images, write to file
-  
-  # Initialize loop
-  phi <- vector("list", length = nrow(data_fp))
-  p <- progress_info(nrow(data_fp))
+  # Initialize loop for footprint calculation
+  n_fp <- nrow(data_fp)
+  phi <- vector("list", length = n_fp)
+  fp_topo <- matrix(0, nrow = nrow(aoi_grid), ncol = ncol(aoi_grid))
+  n_topo <- 0
+  p <- progress_info(n_fp)
   
   # Calculate footprint matrices
-  for (i in 1:nrow(data_fp)) {
+  for (i in 1:n_fp) {
     
-    # Calculate footprint, add to list
-    fp_args <- list(
-      grid = grid,
-      wd = data_fp$wd[i],
-      ustar = data_fp$ustar[i],
-      mo_length = data_fp$mo_length[i],
-      v_sigma = data_fp$v_sigma[i],
-      blh = data_fp$blh[i],
-      z = md$tower_height,
-      zd = data_fp$zd[i],
-      zo = data_fp$zo[i]
-    )
-    fp_temp <- rlang::exec(fp_fun, !!!fp_args)
+    # Get parameters from data list
+    fp_args <- data_fp_list %>% 
+      purrr::modify(i) %>% 
+      # Splice in grid
+      purrr::prepend(list(grid = grid))
     
-    #fp_temp <- calc_fp_kljun(
-    #  grid = grid,
-    #  wd = site_ffp$wd[i],
-    #  ustar = site_ffp$ustar[i],
-    #  mo_length = site_ffp$mo_length[i],
-    #  v_sigma = site_ffp$v_sigma[i],
-    #  blh = site_ffp$blh[i],
-    #  z = md$tower_height,
-    #  zd = site_ffp$zd[i],
-    #  zo = site_ffp$zo[i]
-    #)
+    # Calculate footprint
+    fp_temp <- rlang::exec(model_ref$fun, !!!fp_args)
     
     # Calculate AOI coverage
     phi[i] <- sum(fp_temp * aoi_grid)
@@ -276,11 +297,16 @@ if (control$fp) {
     # - this can be suppressed by setting trunc = NA in write_matrix() 
     write_matrix(fp_temp, file.path(fp_out, "footprints", fp_temp_nm))
     
-    # if (!all(is.na(fp_temp))) fp_topo <- fp_topo + fp_temp
+    # Add to footprint topology (unless it contains missing values)
+    if (!any(is.na(fp_temp))) {
+      fp_topo <- fp_topo + fp_temp
+      n_topo <- n_topo + 1
+    } 
     
     p$tick()
   }
   
+  # Estimate total size of footprint output directory 
   dir_size <- file.path(fp_out, "footprints") %>% 
     list.files(full.names = TRUE) %>%
     magrittr::extract(1:50) %>%
@@ -297,14 +323,18 @@ if (control$fp) {
   )
   cat("Writing summary output...")
   
-  # Write file with just footprint data so this doesn't have to be run again
-  fp_basics <- phi %>% 
+  # Calculate topology and write to file
+  topo_out <- file.path(
+    path_out, "topology", paste0("all_", control$fp_model, "_", tag_out)
+  )
+  fp_topo <- fp_topo / n_topo
+  write_matrix(fp_topo, topo_out, trunc = NA, compress = FALSE)
+  
+  # Write file with footprint stats
+  fp_stats <- phi %>% 
     tibble::enframe(name = "timestamp", value = "phi") %>% 
-    dplyr::mutate(
-      timestamp = lubridate::ymd_hms(timestamp, tz = md$tz_name)
-    ) %>%
+    dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp)) %>%
     tidyr::unnest(phi) %>%
-    dplyr::right_join(dplyr::select(data, timestamp, ustar, mo_length)) %>%
     # Classify phi according to Gockede et al. 2008
     dplyr::mutate(
       phi_class = dplyr::case_when(
@@ -316,50 +346,75 @@ if (control$fp) {
         dplyr::between(phi, 0.50, 0.80) ~ 2L,
         # Disturbed measurements
         dplyr::between(phi, 0.00, 0.50) ~ 3L
-      ),
-      # TODO allow for dynamic displacement here
-      zeta = ((md$tower_height - md$displacement) / mo_length),
-      # Indicate whether footprint is valid according to Kljun et al. 2015
-      # - NOTE: for ustar Kljun only indicate > 0.1, but adding 2.0 upper limit
-      # - Olson et al. 2004 (FLUXNET) suggest 6.0, but none >1 & <2
-      # - this suggests spurious values above 2
-      ffp_valid = dplyr::if_else(
-        magrittr::and(dplyr::between(ustar, 0.1, 2), zeta >= -15.5), 1L, 0L
       )
     ) %>% 
-    dplyr::select(-ustar, -mo_length, -zeta) %>%
     # Give phi vars suffix with model tag
     dplyr::rename_with(
       ~ stringr::str_c(.x, "_", tolower(control$fp_model)), c(phi, phi_class)
     )
   
-  fp_basics_out <- file.path(
-    path_out, "basics", 
-    paste0("footprint_basics_", control$fp_model, "_", tag_out, ".csv")
+  # Compute model-specific validity flags
+  if (control$fp_model == "K15") {
+    # Indicate whether footprint is valid according to Kljun et al. 2015
+    fp_stats <- fp_stats %>%
+      dplyr::right_join(
+        dplyr::select(data, timestamp, ustar, mo_length, blh, zm, zd, zo), 
+        by = "timestamp"
+      ) %>%
+      dplyr::arrange(timestamp) %>%
+      dplyr::mutate(
+        z = zm - zd,
+        k15_valid = dplyr::case_when(
+          ustar < 0.1 ~ 0L,
+          z / mo_length < -15.5 ~ 0L,
+          20 * zo >= z ~ 0L,
+          z < 0.8 * blh ~ 0L,
+          is.na(phi_k15) ~ NA_integer_,
+          TRUE ~ 1L
+        )
+      ) %>%
+      dplyr::select(-z, -zm, -zd, -zo, -ustar, -mo_length, -blh)
+  }
+  
+  if (control$fp_model == "KM01") {
+    # Indicate whether footprint is valid according to Kormann & Meixner 2001
+    fp_stats <- fp_stats %>%
+      dplyr::right_join(
+        dplyr::select(data, timestamp, mo_length, zm, zd), by = "timestamp"
+      ) %>%
+      dplyr::arrange(timestamp) %>%
+      dplyr::mutate(
+        z = zm - zd,
+        km01_valid = dplyr::if_else(abs(z / mo_length) > 3, 0L, 1L)
+      ) %>%
+      dplyr::select(-z, -zm, -zd, -mo_length)
+  }
+  
+  fp_stats_out <- file.path(
+    path_out, "stats", 
+    paste0("footprint_stats_", control$fp_model, "_", tag_out, ".csv")
   )
-  readr::write_csv(fp_basics, fp_basics_out)
+  readr::write_csv(fp_stats, fp_stats_out)
   
   # Create documentation for phi output
-  fp_basics_docu <- settings
-  fp_basics_docu <- append(
+  fp_stats_docu <- settings
+  fp_stats_docu <- append(
     settings, list(
       files = c(data_input, era_input, aoi_input),
       model_params = list(
-        method = "K15", fetch = attr(grid, "fetch"), res = attr(grid, "res")
+        model = control$fp_model, 
+        roughness = if ("zo" %in% model_ref$vars) "zo" else "ws/ustar",
+        fetch = attr(grid, "fetch"), 
+        res = attr(grid, "res")
       )
     )
   )
-  fp_basics_docu_out <- stringr::str_replace(fp_basics_out, ".csv", ".txt")
+  fp_stats_docu_out <- stringr::str_replace(fp_stats_out, ".csv", ".txt")
   # Save documentation
-  sink(fp_basics_docu_out)
-  print(fp_basics_docu) 
+  sink(fp_stats_docu_out)
+  print(fp_stats_docu) 
   sink()
   
   cat("done.\n")
 }
-
-# TODO footprint average module
-# - to save memory, do this by cumulatively summing matrices
-# - and then divide by n at the end
-# - keep track of empty or NA matrices and don't add these
 
