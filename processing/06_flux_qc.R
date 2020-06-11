@@ -62,7 +62,9 @@ md_path <- latest_version(file.path(ep_path_in, "metadata"))
 st_path <- latest_version(file.path(wd, "processing", "00_raw_output", "stats"))
 
 # Footprint inputs
-fp_inputs <- latest_version(fp_path_in)
+fp_inputs <- latest_version(
+  fp_path_in, paste0("footprint_stats_", c("K15", "KM01"))
+)
 #fetch_input <- latest_version(fp_path_in, "fetch")
 
 # Set tag for creating output file names
@@ -105,6 +107,9 @@ devtools::load_all("~/Desktop/DATA/Flux/tools/RFlux", quiet = TRUE)
 workset <- ecworkset(ep_path, qc_path, md_path, st_path)
 
 # Pre-screen fluxes for periods when rain may have affected sensors
+# - A big question is whether to do this before or after running cleanFlux
+# - I think before since cleanFlux looks for statistical evidence of problems
+# - Makes sense to omit points with known errors from consideration altogether
 workset <- workset %>%
   # Add gap-filled rain data
   dplyr::bind_cols(dplyr::select(data, p_rain_f)) %>%
@@ -131,40 +136,61 @@ data_c <- readr::read_csv(
 
 # Parse timestamp and tidy
 data_c <- data_c %>%
-  dplyr::mutate(
-    timestamp = lubridate::ymd_hm(TIMESTAMP_END)
-  ) %>%
-  dplyr::select(timestamp, dplyr::everything()) %>%
   dplyr::rename_with(tolower) %>%
+  dplyr::mutate(timestamp = lubridate::ymd_hm(timestamp_end), .before = 1) %>%
+  dplyr::select(-h, -le, -fc, -nee, -fm, -fch4) %>%
+  # Storage-corrected fluxes are indicated by 'uncleaned' suffix
+  dplyr::rename_with(~ stringr::str_remove(.x, "_uncleaned")) %>%
+  # 'nee' is replaced with 'fc' for continuity
+  dplyr::rename_with(~ stringr::str_replace(.x, "nee", "fc")) %>%
+  # Data flags are renamed with 'qc' prefix for continuity
+  dplyr::rename_with(
+    ~ stringr::str_c("qc_", stringr::str_remove(.x, "_flag")), 
+    dplyr::ends_with("data_flag")
+  ) %>%
   dplyr::left_join(dplyr::select(data, timestamp, night), by = "timestamp")
 
-# Recode outlying flags - SKIP
+# Recode outlying flags
+# 0 = not an outlier
+# 1 = outlier without data problem/error
+# 2 = outlier with potential underlying data problem/error
+data_c <- data_c %>%
+  dplyr::mutate(
+    qc_h_outlier = dplyr::if_else(
+      h_outlying_flag == 1 & qc_h_data > 0, 2, h_outlying_flag
+    ),
+    qc_le_outlier = dplyr::if_else(
+      le_outlying_flag == 1 & qc_le_data > 0, 2, le_outlying_flag
+    ),
+    qc_fc_outlier = dplyr::if_else(
+      fc_outlying_flag == 1 & qc_fc_data > 0, 2, fc_outlying_flag
+    ),
+    qc_fch4_outlier = dplyr::if_else(
+      fch4_outlying_flag == 1 & qc_fch4_data > 0, 2, fch4_outlying_flag
+    )
+  ) %>%
+  # Drop original flags
+  dplyr::select(-dplyr::ends_with("outlying_flag"))
+
 data_c <- dplyr::mutate(
   data_c,
-  nee_outlying_flag = dplyr::if_else(
-    nee_outlying_flag == 1 & nee_data_flag > 0, 2L, nee_outlying_flag
-  ),
-  nee_outlying_flag = dplyr::if_else(
-    nee_outlying_flag == 1 & nee_data_flag > 0, 2L, nee_outlying_flag
-  ),
-  nee_outlying_flag = dplyr::if_else(
-    nee_outlying_flag == 1 & nee_data_flag > 0, 2L, nee_outlying_flag
-  ),
-  fch4_outlying_flag = dplyr::if_else(
-    fch4_outlying_flag == 1 & fch4_data_flag > 0, 2L, fch4_outlying_flag
-  )
+  qc_h = combine_flags(qc_h_data, qc_h_outlier),
+  qc_le = combine_flags(qc_le_data, qc_le_outlier),
+  qc_fc = combine_flags(qc_fc_data, qc_fc_outlier),
+  qc_fch4 = combine_flags(qc_fch4_data, qc_fch4_outlier),
+  .before = "h_resid"
 )
 
 # Examine flags
 data_c %>%
-  mutate(qc = factor(nee_data_flag)) %>%
+  mutate(qc = factor(qc_fc_data)) %>%
   ggplot(aes(timestamp, fc, color = qc)) +
   facet_wrap(~ night) +
   geom_point() +
   ylim(-40, 40)
 data_c %>%
-  mutate(qc = factor(fch4_data_flag)) %>%
-  ggplot(aes(timestamp, fm, color = qc)) +
+  mutate(qc = factor(qc_fch4_data)) %>%
+  ggplot(aes(timestamp, fch4, color = qc)) +
   facet_wrap(~ night) +
   geom_point() +
   ylim(-0.75, 1.25)
@@ -175,26 +201,28 @@ data_c %>%
 # Examine flags
 data_c %>%
   mutate(
-    ol = factor(nee_outlying_flag),
-    fc = if_else(nee_data_flag == 2, NA_real_, fc), qc = factor(nee_data_flag)
+    qc = factor(qc_fc_outlier),
+    fc = if_else(qc_fc_data == 2, NA_real_, fc)
   ) %>%
-  ggplot(aes(timestamp, fc, color = ol, shape = qc)) +
+  ggplot(aes(timestamp, fc, color = qc)) +
   facet_wrap(~ night) +
   geom_point()
 data_c %>%
   mutate(
-    ol = factor(fch4_outlying_flag),
-    fm = if_else(fch4_data_flag == 2, NA_real_, fm), qc = factor(fch4_data_flag)
+    qc = factor(qc_fch4_outlier),
+    fch4 = if_else(qc_fch4_data == 2, NA_real_, fch4)
   ) %>%
-  ggplot(aes(timestamp, fm, color = ol, shape = qc)) +
+  ggplot(aes(timestamp, fch4, color = qc)) +
   facet_wrap(~ night) +
   geom_point()
 
 # Examine data without outliers
 data_c %>%
-  ggplot(aes(timestamp, nee)) +
+  mutate(fc = clean(fc, qc_fc)) %>%
+  ggplot(aes(timestamp, fc)) +
   geom_point()
 data_c %>%
+  mutate(fch4 = clean(fch4, qc_fch4)) %>%
   ggplot(aes(timestamp, fch4)) +
   geom_point()
 
@@ -210,66 +238,55 @@ data_c %>%
 # Flag high uncertainty (i.e. low quality) in remaining fluxes
 # remove ch4 random uncertainty > 0.2? (see Runkle2019)
 data_c %>% 
-  mutate(qc = factor(pull(data, h_randunc_hf) > 25)) %>%
-  ggplot(aes(timestamp, h, color = qc)) +
+  mutate(
+    fc = clean(fc, qc_fc),
+    qc = factor(pull(data, fc_randunc_hf) > 10)
+  ) %>%
+  ggplot(aes(timestamp, fc, color = qc)) +
   geom_point()
 data_c %>% 
-  mutate(qc = factor(pull(data, le_randunc_hf) > 50)) %>%
-  ggplot(aes(timestamp, le, color = qc)) +
-  geom_point()
-data_c %>% 
-  mutate(qc = factor(pull(data, fc_randunc_hf) > 10)) %>%
-  ggplot(aes(timestamp, nee, color = qc)) +
-  geom_point()
-data_c %>% 
-  mutate(qc = factor(pull(data, fch4_randunc_hf) > 0.2)) %>%
+  mutate(
+    fch4 = clean(fch4, qc_fch4),
+    qc = factor(pull(data, fch4_randunc_hf) > 0.2)
+  ) %>%
   ggplot(aes(timestamp, fch4, color = qc)) +
   geom_point()
 data_c <- data_c %>%
   mutate(
-    h_rand_unc = pull(data, h_randunc_hf),
-    le_rand_unc = pull(data, le_randunc_hf),
-    nee_rand_unc = pull(data, fc_randunc_hf),
+    fc_rand_unc = pull(data, fc_randunc_hf),
     fch4_rand_unc = pull(data, fch4_randunc_hf),
     
-    h_unc_flag = flag_thr(h_rand_unc, 25, "higher"),
-    le_unc_flag = flag_thr(le_rand_unc, 50, "higher"),
-    nee_unc_flag = flag_thr(nee_rand_unc, 5, "higher"),
+    fc_unc_flag = flag_thr(fc_rand_unc, 5, "higher"),
     fch4_unc_flag = flag_thr(fch4_rand_unc, 0.1, "higher")
   )
 
 # Footprint coverage of AOI
 data_c %>%
-  mutate(nee = clean(nee, nee_unc_flag), flag = factor(foot_flag)) %>%
+  mutate(fc = clean(fc, qc_fc)) %>%
   left_join(fp) %>%
-  ggplot(aes(timestamp, nee, color = flag)) +
-  geom_point(size = 1)
-data_c %>%
-  mutate(nee = clean(nee, nee_unc_flag)) %>%
-  left_join(fp) %>%
-  ggplot(aes(timestamp, nee, color = phi_k15 > 0.80)) +
+  ggplot(aes(timestamp, fc, color = phi_k15 > 0.80)) +
   geom_point(size = 1)
 # Phi K15 looks GOOD
 data_c %>%
-  mutate(nee = clean(nee, nee_unc_flag)) %>%
+  mutate(fc = clean(fc, qc_fc)) %>%
   left_join(fp) %>%
-  ggplot(aes(timestamp, nee, color = phi_km01 > 0.80)) +
+  ggplot(aes(timestamp, fc, color = phi_km01 > 0.80)) +
   geom_point(size = 1)
 data_c %>%
-  mutate(fch4 = clean(fch4, fch4_unc_flag), flag = factor(foot_flag)) %>%
-  left_join(fp) %>%
-  ggplot(aes(timestamp, fch4, color = flag)) +
-  geom_point(size = 1)
-data_c %>%
-  mutate(fch4 = clean(fch4, fch4_unc_flag)) %>%
+  mutate(fch4 = clean(fch4, qc_fch4)) %>%
   left_join(fp) %>%
   ggplot(aes(timestamp, fch4, color = phi_k15 > 0.80)) +
+  geom_point(size = 1)
+data_c %>%
+  mutate(fch4 = clean(fch4, qc_fch4)) %>%
+  left_join(fp) %>%
+  ggplot(aes(timestamp, fch4, color = phi_km01 > 0.80)) +
   geom_point(size = 1)
 
 
 data_c <- data_c %>%
-  mutate(
-    phi = pull(fp, phi_k15),
+  dplyr::mutate(
+    phi = dplyr::pull(fp, phi_k15),
     phi_flag = flag_thr(phi, 0.80, "lower")
   )
 
