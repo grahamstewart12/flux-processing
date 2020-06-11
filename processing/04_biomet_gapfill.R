@@ -192,7 +192,9 @@ debias_init <- function(data, aux_data, var, diff = FALSE,
     # Manually calculate coefficient for ratios
     beta <- tbl %>%
       dplyr::filter(sign(y) == sign(x) | sign(y) == 0 | sign(x) == 0) %>%
-      dplyr::summarize(beta = sum(abs(y)) / sum(abs(x))) %>%
+      dplyr::summarize(
+        beta = sum(abs(y)) / sum(abs(x)), .groups = "drop_last"
+      ) %>%
       purrr::pluck(1, 1)
     # Assign coefficient as offset in lm
     fit <- lm(y ~ 0 + x, data = tbl)
@@ -509,7 +511,7 @@ gather_fill_data <- function(data, var, backup, order, max_i, ctrl) {
     coef <- data %>% 
       dplyr::select(!!var, !!b_var) %>% 
       tidyr::drop_na() %>% 
-      dplyr::summarize(sum(!!var) / sum(!!b_var)) %>% 
+      dplyr::summarize(sum(!!var) / sum(!!b_var), .groups = "drop_last") %>% 
       purrr::pluck(1)
     list <- append(list, list(b = dplyr::pull(data, !!b_var) * coef))
   }
@@ -587,7 +589,9 @@ plan_fill <- function(list, backup, order, ctrl, var) {
       gap_len = dplyr::pull(tidy_rle(gap), lengths)
     ) %>%
     dplyr::group_by(gap_id) %>%
-    dplyr::summarize(dplyr::across(-gap, ~ length(na.omit(.x)))) %>%
+    dplyr::summarize(
+      dplyr::across(-gap, ~ length(na.omit(.x))), .groups = "drop_last"
+    ) %>%
     dplyr::ungroup()
   
   cover <- gaps %>%
@@ -866,7 +870,7 @@ data_h <- era_c %>%
     data %>%
       dplyr::mutate(timestamp = lubridate::round_date(timestamp, "hour")) %>%
       dplyr::group_by(timestamp) %>%
-      dplyr::summarize(p_rain = sum(p_rain)),
+      dplyr::summarize(p_rain = sum(p_rain), .groups = "drop_last"),
     by = "timestamp"
   )
 
@@ -911,7 +915,8 @@ data_hc <- era_c %>%
       # Solar angle is used to reconstruct time series
       dplyr::summarize(
         p_rain = sum(p_rain), 
-        sol_ang_h = sum(dplyr::if_else(sol_ang < 0, 0, sol_ang)) / 2
+        sol_ang_h = sum(dplyr::if_else(sol_ang < 0, 0, sol_ang)) / 2, 
+        .groups = "drop_last"
       ),
     by = "timestamp"
   )
@@ -930,9 +935,10 @@ p_rain_dist <- data_c %>%
   ) %>%
   dplyr::group_by(timestamp) %>%
   dplyr::summarize(
-    p_rain_hrs = dplyr::na_if(sum(p_rain_ind, na.rm = TRUE), 0)
+    p_rain_hrs = dplyr::na_if(sum(p_rain_ind, na.rm = TRUE), 0), 
+    .groups = "drop_last"
   ) %>% 
-  dplyr::summarize(mean(p_rain_hrs, na.rm = TRUE)) %>%
+  dplyr::summarize(mean(p_rain_hrs, na.rm = TRUE), .groups = "drop_last") %>%
   dplyr::pull()
 
 cat("done.\n")
@@ -961,7 +967,7 @@ frac_ppfd_era <- data_hc %>%
   dplyr::select(ppfd_in) %>% 
   dplyr::bind_cols(dplyr::select(era_d, sw_in_d)) %>%
   tidyr::drop_na() %>% 
-  dplyr::summarize(sum(sw_in_d) / sum(ppfd_in)) %>% 
+  dplyr::summarize(sum(sw_in_d) / sum(ppfd_in), .groups = "drop_last") %>% 
   purrr::pluck(1)
 frac_ppfd_era
 
@@ -972,6 +978,7 @@ era_df <- era_d %>%
   dplyr::right_join(
     dplyr::select(data, timestamp, sol_ang), by = "timestamp"
   ) %>%
+  dplyr::arrange(timestamp) %>%
   dplyr::mutate(
     # Fill ERA solar angle ahead
     sol_ang_h = dplyr::if_else(is.na(sol_ang_h), lead(sol_ang_h), sol_ang_h),
@@ -988,7 +995,16 @@ era_df <- era_d %>%
       TRUE ~ NA_real_
     )
   ) %>%
+  # Fill every other point with linear interpolation
   dplyr::mutate(dplyr::across(c(-timestamp, -p_rain), fill_linear)) %>%
+  # Estimate first point using next available difference
+  dplyr::mutate(dplyr::across(
+    c(-timestamp, -p_rain), 
+    ~ dplyr::if_else(
+      dplyr::row_number() == 1, 
+      dplyr::lead(.x, 1) - (dplyr::lead(.x, 2) - dplyr::lead(.x, 1)), .x
+    )
+  )) %>%
   dplyr::mutate(dplyr::across(c(sw_in, sw_out), ~ . * sol_ang_ratio)) %>%
   dplyr::mutate(
     # Adhere to local time zone
