@@ -95,13 +95,15 @@ combine_flags <- function(..., clean_value = 0L) {
     dots <- as.list(dots[[1]])
   }
   
-  dots <- dots %>%
-    purrr::map(as.integer) %>%
-    purrr::map(~ dplyr::if_else(. <= clean_value, NA_integer_, .))
+  out <- purrr::lift_dl(pmax)(dots, na.rm = TRUE)
+  
+  #dots <- dots %>%
+  #  purrr::map(as.integer) %>%
+  #  purrr::map(~ dplyr::if_else(. <= clean_value, NA_integer_, .))
   
   
-  combined <- dplyr::coalesce(!!! dots)
-  out <- tidyr::replace_na(combined, 0L)
+  #combined <- dplyr::coalesce(!!! dots)
+  #out <- tidyr::replace_na(combined, 0L)
   
   out
 }
