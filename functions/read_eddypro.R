@@ -35,3 +35,69 @@ read_eddypro_settings <- function(file) {
     purrr::modify(2) %>%
     purrr::map(readr::parse_guess)
 }
+
+read_ghg <- function(file, ext = c("data", "metadata"), biomet = FALSE, ...) {
+  
+  ext <- rlang::arg_match(ext)
+  ext <- stringr::str_c(".", ext)
+  
+  if (biomet) {
+    ext <- stringr::str_c("-biomet", ext)
+    nl <- 5
+    col_spec <- readr::cols_only(
+      DATE = readr::col_date(),
+      TIME = readr::col_character(),
+      `LOGGERPOWER_1_1_1(other)` = readr::col_double(),
+      `LOGGERTEMP_1_1_1(C)` = readr::col_double(),
+      `LOGGERVIN_1_1_1(V)` = readr::col_double(),
+      `LWIN_1_1_1(W/m^2)` = readr::col_double(),
+      `LWOUT_1_1_1(W/m^2)` = readr::col_double(),
+      `PPFD_1_1_1(umol/m^2/s^1)` = readr::col_double(),
+      `RH_1_1_1(%)` = readr::col_double(),
+      `RN_1_1_1(W/m^2)` = readr::col_double(),
+      `SHF1_1_1_1(W/m^2)` = readr::col_double(),
+      `SHF2_2_1_1(W/m^2)` = readr::col_double(),
+      `SHF3_3_1_1(W/m^2)` = readr::col_double(),
+      `SHFSENS1_1_1_1(other)` = readr::col_double(),
+      `SHFSENS2_2_1_1(other)` = readr::col_double(),
+      `SHFSENS3_3_1_1(other)` = readr::col_double(),
+      `SWC1_1_1_1(m^3/m^3)` = readr::col_double(),
+      `SWC2_2_1_1(m^3/m^3)` = readr::col_double(),
+      `SWC3_3_1_1(m^3/m^3)` = readr::col_double(),
+      `SWIN_1_1_1(W/m^2)` = readr::col_double(),
+      `SWOUT_1_1_1(W/m^2)` = readr::col_double(),
+      `TA_1_1_1(C)` = readr::col_double(),
+      `TS1_1_1_1(C)` = readr::col_double(),
+      `TS2_2_1_1(C)` = readr::col_double(),
+      `TS3_3_1_1(C)` = readr::col_double(),
+      `P_RAIN_1_1_1(mm)` = readr::col_double(),
+      `VERSION_1_1_1(other)` = readr::col_double()
+    )
+  } else {
+    nl <- 7
+    col_spec <- readr::cols(
+      DATAH = readr::col_skip(),
+      Date = readr::col_date(),
+      Time = readr::col_character(),
+      CHK = readr::col_character(),
+      .default = readr::col_double()
+    )
+  }
+  
+  name <- basename(file)
+  file_con <- unz(file, stringr::str_replace(name, ".ghg", ext))
+  #on.exit(closeAllConnections())
+  
+  out <- readr::read_tsv(
+    file_con,
+    col_types = col_spec,
+    na = c("", "NA", "-9999"),
+    skip = nl,
+    progress = FALSE,
+    ...
+  )
+  
+  readr::stop_for_problems(out)
+  
+  out
+}
