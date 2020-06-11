@@ -72,29 +72,33 @@ md <- purrr::pluck(site_metadata, settings$site)
 
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
-wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+wd <- file.path(
+  "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
+)
 path_in <- file.path(wd, "processing", "04_biomet_gapfill", "data")
   
 # Input file - gap-filled biomet
-data_input <- latest_version(path_in)
+path_data <- latest_version(path_in)
   
 # Input file - processed ERA data for site location
-era_input <- latest_version(
-  file.path("~/Desktop", "DATA", "Flux", "JLL", "all", "era"), "era_proc"
+path_era <- latest_version(
+  file.path("/Users/Graham/Desktop", "DATA", "Flux", "JLL", "all", "era"), 
+  "era_proc"
 )
 # Input file - NOAA boundary layer height (/scripts/download_noaa_blh.R)
-noaa_input <- file.path(
-  "~/Desktop/DATA/Flux", "JLL", "all", "noaa", "noaa_blh_hh_interp.csv"
+path_noaa <- file.path(
+  "/Users/Graham/Desktop/DATA/Flux", "JLL", "all", "noaa", 
+  "noaa_blh_hh_interp.csv"
 )
   
 # AOI
-aoi_input <- file.path(dirname(wd), paste0(settings$site, "_area_proc"))
+path_delin <- file.path(dirname(wd), "site_info", "delineation")
+
+# Set path for output files
+path_out <- file.path(wd, "processing", "05_footprint")
   
 # Set tag for creating output file names
 tag_out <- create_tag(settings$site, settings$year, settings$date)
-  
-# Set path for output files
-path_out <- file.path(wd, "processing", "05_footprint")
 
 
 ### Load required input data ===================================================
@@ -103,7 +107,7 @@ cat("Importing data files.\n")
 
 # Load the data
 data <- readr::read_csv(
-  data_input, guess_max = 6000, 
+  path_data, guess_max = 6000, 
   col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 # Force local time zone to align properly with external data
@@ -111,12 +115,12 @@ data <- dplyr::mutate(
   data, timestamp = lubridate::force_tz(timestamp, md$tz_name)
 )
 
-# Import site AOI polygon
-aoi <- rgdal::readOGR(aoi_input, verbose = FALSE)
+# Import site delineation polygon
+delin <- sf::read_sf(path_delin)
 
 # Import ERA data, get variables
 era <- readr::read_csv(
-  era_input, col_types = readr::cols(.default = readr::col_guess()), 
+  path_era, col_types = readr::cols(.default = readr::col_guess()), 
   progress = FALSE
 )
 era <- era %>%
@@ -125,7 +129,7 @@ era <- era %>%
 
 # Import NOAA data
 noaa <- readr::read_csv(
-  noaa_input, col_types = readr::cols(.default = readr::col_guess()), 
+  path_noaa, col_types = readr::cols(.default = readr::col_guess()), 
   progress = FALSE
 )
 noaa <- noaa %>%
@@ -177,7 +181,7 @@ if (control$fetch) {
   
   # Create documentation for fetch output
   fetch_docu <- settings
-  fetch_docu$files <- c(data_input)
+  fetch_docu$files <- c(path_data)
   fetch_docu$method <- control$fetch_model
   fetch_docu_out <- stringr::str_replace(fetch_out, ".csv", ".txt")
   # Save documentation
@@ -245,7 +249,7 @@ if (control$fp) {
   grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
   
   # Convert AOI to grid
-  aoi_grid <- aoi_to_grid(aoi, grid, c(md$x_utm, md$y_utm))
+  aoi_grid <- aoi_to_grid(delin, grid, c(md$x_utm, md$y_utm))
   
   # Extent of AOI for trimming footprint grid
   extent_trim <- get_trim_extent(aoi_grid)
@@ -272,6 +276,8 @@ if (control$fp) {
   fp_topo <- matrix(0, nrow = nrow(aoi_grid), ncol = ncol(aoi_grid))
   n_topo <- 0
   p <- progress_info(n_fp)
+  
+  cat("Calculating half-hourly footprints.\n")
   
   # Calculate footprint matrices
   for (i in 1:n_fp) {
@@ -400,7 +406,7 @@ if (control$fp) {
   fp_stats_docu <- settings
   fp_stats_docu <- append(
     settings, list(
-      files = c(data_input, era_input, aoi_input),
+      files = c(path_data, path_era, path_delin),
       model_params = list(
         model = control$fp_model, 
         roughness = if ("zo" %in% model_ref$vars) "zo" else "ws/ustar",
