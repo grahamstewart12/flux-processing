@@ -19,14 +19,16 @@ library(lubridate, warn.conflicts = FALSE)
 library(tidyverse, warn.conflicts = FALSE)
 
 # Load reference files
-source("~/Desktop/DATA/Flux/tools/reference/combine_eddypro_control.R")
-source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+path_ref <- "/Users/Graham/Desktop/DATA/Flux/tools/reference"
+source(file.path(path_ref, "combine_eddypro_control.R"))
+source(file.path(path_ref, "site_metadata.R"))
 
 # Load functions
-source("~/Desktop/DATA/Flux/tools/engine/functions/attributes.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/read_eddypro.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
+path_funs <- "/Users/Graham/Desktop/DATA/Flux/tools/engine/functions"
+source(file.path(path_funs, "attributes.R"))
+source(file.path(path_funs, "dates_and_times.R"))
+source(file.path(path_funs, "read_eddypro.R"))
+source(file.path(path_funs, "utilities.R"))
 
 
 ### Helper functions ===========================================================
@@ -48,7 +50,9 @@ str_subset_eddypro <- function(files) {
 
 # Set directory where outputs are stored
 # This assumes that the subdirectory structure is already present
-wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+wd <- file.path(
+  "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
+)
 
 # Set the folders containing the EddyPro outputs to be combined
 ep_dirs <- purrr::pluck(
@@ -69,14 +73,15 @@ path_out <- file.path(wd, "processing", "01_combine_eddypro")
 ### Load, combine, and save the EddyPro files ==================================
 
 # Set the lists to hold different types of output files
-ep_settings <- vector("list", length = length(ep_paths))
+ep_settings <- vctrs::vec_init(list(), length(ep_paths))
+
 lists <- 1:6 %>%
-  purrr::map(~ vector("list", length = length(ep_paths))) %>%
+  purrr::map(~ vctrs::vec_init(list(), length(ep_paths))) %>%
   rlang::set_names(
     c("full_output", "metadata", "biomet", "fluxnet", "qc_details", "st7")
   )
 
-data_files <- vector("list", length = length(ep_paths))
+data_files <- vctrs::vec_init(list(), length(ep_paths))
 
 # Read files into the lists
 for (i in seq_along(ep_paths)) {
