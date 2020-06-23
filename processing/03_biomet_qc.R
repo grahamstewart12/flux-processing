@@ -223,10 +223,10 @@ biomet_auto_flags <- function(data, var, p_rain) {
     # Compute statistics
     dplyr::summarize(
       x_var = sd(x, na.rm = TRUE),
-      
       dx_var = sd(dx, na.rm = TRUE),
       
-      acf = x %>% tidy_acf() %>% purrr::pluck("acf", 2)
+      acf = x %>% tidy_acf() %>% purrr::pluck("acf", 2),
+      .groups = "drop_last"
     ) %>%
     dplyr::mutate(
       # Sigma test
@@ -251,7 +251,6 @@ biomet_auto_flags <- function(data, var, p_rain) {
       k_hi = pmax(k_hi, mean(dx_var, na.rm = TRUE) - sd(dx_var, na.rm = TRUE)),
       
       v_flag = dplyr::if_else(x_var < v_lo | x_var > v_hi, 2L, 0L),
-      
       k_flag = dplyr::if_else(dx_var < k_lo | dx_var > k_hi, 2L, 0L),
       
       # Secondary check on sigma/spike tests - autocorrelation
@@ -285,7 +284,9 @@ biomet_auto_flags <- function(data, var, p_rain) {
     dplyr::select(x, year, date, timestamp) %>%
     dplyr::group_by(date) %>%
     # Number of non-missing values (exclude days that are entirely missing)
-    dplyr::summarize(n = dplyr::na_if(length(na.omit(x)), 0)) %>%
+    dplyr::summarize(
+      n = dplyr::na_if(length(na.omit(x)), 0), .groups = "drop_last"
+    ) %>%
     dplyr::mutate(
       # Null test
       n_mean = mean(n, na.rm = TRUE), 
@@ -587,11 +588,11 @@ qc_biomet <- dplyr::mutate(
 
 p_rain_rh_lim <- data %>% 
   dplyr::filter(p_rain > 0, !is.na(rh_bm)) %>% 
-  dplyr::summarize(mean(rh_bm) - 2 * sd(rh_bm)) %>%
+  dplyr::summarize(mean(rh_bm) - 2 * sd(rh_bm), .groups = "drop_last") %>%
   purrr::pluck(1, 1) %>% signif(1)
 p_rain_kt_lim <- data %>% 
   dplyr::filter(p_rain > 0, !is.na(kt)) %>% 
-  dplyr::summarize(mean(kt) + 2 * sd(kt)) %>%
+  dplyr::summarize(mean(kt) + 2 * sd(kt), .groups = "drop_last") %>%
   purrr::pluck(1, 1) %>% signif(1)
 
 qc_biomet <- dplyr::mutate(
@@ -656,16 +657,6 @@ flag_plots <- all_vars %>%
   rlang::set_names(
     stringr::str_c(purrr::map_chr(all_vars, rlang::as_label), "_flags")
   )
-
-# How many flagged?
-data %>%
-  dplyr::select(dplyr::all_of(
-    stringr::str_c("qc_", purrr::map_chr(all_vars, rlang::as_string))
-  )) %>%
-  tidyr::pivot_longer(dplyr::everything()) %>%
-  dplyr::group_by(name) %>%
-  dplyr::filter(value == 2) %>%
-  dplyr::summarize(n_flag = dplyr::n())
 
 # Plot overall flag for each var
 qc_plots <- all_vars %>%
