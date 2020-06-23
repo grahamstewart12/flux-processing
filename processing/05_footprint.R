@@ -37,18 +37,19 @@
 # Output(s):
 
 # Load the required packages
-devtools::load_all("~/R Projects/footprints", quiet = TRUE)
+devtools::load_all("/Users/Graham/R Projects/footprints", quiet = TRUE)
 library(progress)
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
 
 # Load reference files
-source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+source("/Users/Graham/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
 # Load functions
-source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/latest_version.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
+path_funs <- "/Users/Graham/Desktop/DATA/Flux/tools/engine/functions"
+source(file.path(path_funs, "dates_and_times.R"))
+source(file.path(path_funs, "latest_version.R"))
+source(file.path(path_funs, "utilities.R"))
 
 
 ### Helper functions ===========================================================
@@ -75,27 +76,25 @@ md <- purrr::pluck(site_metadata, settings$site)
 wd <- file.path(
   "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
 )
-path_in <- file.path(wd, "processing", "04_biomet_gapfill", "data")
-  
-# Input file - gap-filled biomet
-path_data <- latest_version(path_in)
-  
-# Input file - processed ERA data for site location
-path_era <- latest_version(
-  file.path("/Users/Graham/Desktop", "DATA", "Flux", "JLL", "all", "era"), 
-  "era_proc"
-)
-# Input file - NOAA boundary layer height (/scripts/download_noaa_blh.R)
-path_noaa <- file.path(
-  "/Users/Graham/Desktop/DATA/Flux", "JLL", "all", "noaa", 
-  "noaa_blh_hh_interp.csv"
-)
-  
-# AOI
-path_delin <- file.path(dirname(wd), "site_info", "delineation")
 
-# Set path for output files
-path_out <- file.path(wd, "processing", "05_footprint")
+paths <- list(
+  # Input file - gap-filled biomet
+  data = latest_version(
+    file.path(wd, "processing", "04_biomet_gapfill", "data")
+  ),
+  # Input file - processed ERA data for site location
+  era = latest_version(
+    file.path(dirname(dirname(wd)), "JLL", "all", "era"), "era_proc"
+  ),
+  # Input file - NOAA boundary layer height (/scripts/download_noaa_blh.R)
+  noaa = file.path(
+    dirname(dirname(wd)), "JLL", "all", "noaa", "noaa_blh_hh_interp.csv"
+  ),
+  # Site delineation polygon
+  delin = file.path(dirname(wd), "site_info", "delineation"),
+  # Output files
+  out = file.path(wd, "processing", "05_footprint")
+)
   
 # Set tag for creating output file names
 tag_out <- create_tag(settings$site, settings$year, settings$date)
@@ -105,9 +104,12 @@ tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 cat("Importing data files.\n")
 
+# Import site delineation polygon
+delin <- sf::read_sf(paths$delin)
+
 # Load the data
 data <- readr::read_csv(
-  path_data, guess_max = 6000, 
+  paths$data, guess_max = 6000, 
   col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 # Force local time zone to align properly with external data
@@ -115,12 +117,9 @@ data <- dplyr::mutate(
   data, timestamp = lubridate::force_tz(timestamp, md$tz_name)
 )
 
-# Import site delineation polygon
-delin <- sf::read_sf(path_delin)
-
 # Import ERA data, get variables
 era <- readr::read_csv(
-  path_era, col_types = readr::cols(.default = readr::col_guess()), 
+  paths$era, col_types = readr::cols(.default = readr::col_guess()), 
   progress = FALSE
 )
 era <- era %>%
@@ -129,7 +128,7 @@ era <- era %>%
 
 # Import NOAA data
 noaa <- readr::read_csv(
-  path_noaa, col_types = readr::cols(.default = readr::col_guess()), 
+  paths$noaa, col_types = readr::cols(.default = readr::col_guess()), 
   progress = FALSE
 )
 noaa <- noaa %>%
@@ -176,12 +175,12 @@ if (control$fetch) {
   
   fetch <- dplyr::bind_cols(dplyr::select(data, timestamp), fetch)
   
-  fetch_out <- file.path(path_out, "fetch", paste0("fetch_", tag_out, ".csv"))
+  fetch_out <- file.path(paths$out, "fetch", paste0("fetch_", tag_out, ".csv"))
   readr::write_csv(fetch, fetch_out)
   
   # Create documentation for fetch output
   fetch_docu <- settings
-  fetch_docu$files <- c(path_data)
+  fetch_docu$files <- c(paths$data)
   fetch_docu$method <- control$fetch_model
   fetch_docu_out <- stringr::str_replace(fetch_out, ".csv", ".txt")
   # Save documentation
@@ -224,7 +223,8 @@ if (control$fp) {
   
   # Create new folder for output files
   fp_out <- file.path(
-    path_out, "footprint", paste0("halfhourly_", control$fp_model, "_", tag_out)
+    paths$out, "footprint", 
+    paste0("halfhourly_", control$fp_model, "_", tag_out)
   )
   dir.create(fp_out, showWarnings = FALSE)
   
@@ -246,27 +246,31 @@ if (control$fp) {
     as.list()
   
   # Set up grid
-  grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
+  #grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
   
   # Convert AOI to grid
-  aoi_grid <- aoi_to_grid(delin, grid, c(md$x_utm, md$y_utm))
+  #aoi_grid <- aoi_to_grid(delin, grid, c(md$x_utm, md$y_utm))
   
   # Extent of AOI for trimming footprint grid
-  extent_trim <- get_trim_extent(aoi_grid)
+  #extent_trim <- get_trim_extent(aoi_grid)
   
   # Trim grid to AOI area
   # - no need to calculate footprint weights outside of AOI 
   # - these are implicit in phi
-  grid <- purrr::map(grid, trim_matrix, extent_trim)
+  #grid <- purrr::map(grid, trim_matrix, extent_trim)
   
   # Trim AOI
-  aoi_grid <- trim_matrix(aoi_grid)
+  #aoi_grid <- trim_matrix(aoi_grid)
+  
+  grid <- aoi_to_grid(delin, c(md$x_utm, md$y_utm), delta = 1)
+  
+  aoi_grid <- aoi_to_mask(delin, c(md$x_utm, md$y_utm), delta = 1)
   
   # Write grid to file
   purrr::imap(
     purrr::list_modify(grid, aoi = aoi_grid), 
     ~ write_matrix(
-      .x, file.path(fp_out, "grid", .y), trunc = NA, compress = FALSE
+      .x, file.path(fp_out, "grid", .y), trunc = 0, compress = FALSE
     )
   )
   
@@ -301,7 +305,9 @@ if (control$fp) {
     # Write to file
     # - values are truncated to enable efficient storage as integers
     # - this can be suppressed by setting trunc = NA in write_matrix() 
-    write_matrix(fp_temp, file.path(fp_out, "footprints", fp_temp_nm))
+    write_matrix(
+      fp_temp, file.path(fp_out, "footprints", fp_temp_nm), trunc = 9
+    )
     
     # Add to footprint topology (unless it contains missing values)
     if (!any(is.na(fp_temp))) {
@@ -331,10 +337,10 @@ if (control$fp) {
   
   # Calculate topology and write to file
   topo_out <- file.path(
-    path_out, "topology", paste0("all_", control$fp_model, "_", tag_out)
+    paths$out, "topology", paste0("all_", control$fp_model, "_", tag_out)
   )
   fp_topo <- fp_topo / n_topo
-  write_matrix(fp_topo, topo_out, trunc = NA, compress = FALSE)
+  write_matrix(fp_topo, topo_out, trunc = 0, compress = FALSE)
   
   # Write file with footprint stats
   fp_stats <- phi %>% 
@@ -397,7 +403,7 @@ if (control$fp) {
   }
   
   fp_stats_out <- file.path(
-    path_out, "stats", 
+    paths$out, "stats", 
     paste0("footprint_stats_", control$fp_model, "_", tag_out, ".csv")
   )
   readr::write_csv(fp_stats, fp_stats_out)
@@ -406,7 +412,7 @@ if (control$fp) {
   fp_stats_docu <- settings
   fp_stats_docu <- append(
     settings, list(
-      files = c(path_data, path_era, path_delin),
+      files = c(paths$data, paths$era, paths$delin),
       model_params = list(
         model = control$fp_model, 
         roughness = if ("zo" %in% model_ref$vars) "zo" else "ws/ustar",
