@@ -1,19 +1,58 @@
 
-read_eddypro <- function(file, timestamp = paste(date, time), ...) {
+# Depends on functions/attributes.R
+source("~/Desktop/DATA/Flux/tools/engine/functions/attributes.R")
+
+read_eddypro <- function(file, timestamp = paste(date, time), units = TRUE, 
+                         units_fill = "-", skip = 0, ...) {
   
   timestamp <- rlang::enexpr(timestamp)
   
+  na_strings <- c("NA", "-9999.0", "-9999")
+  
   # Default: skip = 0, units = TRUE
-  data <- openeddy::read_eddy(file, ..., as.is = TRUE)
+  # data <- openeddy::read_eddy(
+  #   file, units = units, skip = skip, ..., as.is = TRUE
+  # )
+  
+  # This code is an experimental adaptation of openeddy function
+  # - but it WORKS
+  var_units <- readr::read_csv(
+    file, col_names = TRUE,
+    col_types = readr::cols(.default = readr::col_character()),
+    na = na_strings, skip = skip, n_max = 1, ...
+  )
+
+  orig_varnames <- readr::read_csv(
+    file, col_names = FALSE,
+    col_types = readr::cols(.default = readr::col_character()), 
+    na = na_strings, skip = skip, n_max = 1, ...
+  )
+  
+  if (units) {
+    read_names <- colnames(var_units)
+    var_units[var_units %in% c("", NA)] <- units_fill
+    skip <- skip + 2
+  } else {
+    var_units[] <- units_fill
+    read_names <- TRUE
+    skip <- 1 + skip
+  }
+  
+  data <- readr::read_csv(
+    file, col_names = read_names,
+    col_types = readr::cols(.default = readr::col_guess()), 
+    na = na_strings, skip = skip, guess_max = 6000, progress = FALSE, ...
+  )
   
   orders <- c("YmdHM", "YmdHMS", "mdyHM", "mdyHMS")
   
   data %>%
-    tibble::as_tibble(.name_repair = "unique") %>%
-    # This drops attributes
-    #dplyr::mutate(dplyr::across(is.factor, as.character)) %>%
+    add_attr("varnames", purrr::flatten_chr(orig_varnames)) %>%
+    add_attr("units", purrr::flatten_chr(var_units)) %>%
+    #tibble::as_tibble(.name_repair = "unique") %>%
     dplyr::mutate(
-      timestamp = lubridate::parse_date_time(!!timestamp, orders = orders)
+      timestamp = lubridate::parse_date_time(!!timestamp, orders = orders),
+      .before = 1
     ) %>%
     # Only reason timestamp doesn't parse is if data is corrupt - remove
     dplyr::filter(!is.na(timestamp))
