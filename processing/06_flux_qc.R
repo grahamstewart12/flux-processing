@@ -23,15 +23,20 @@ library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
 
 # Load reference files
-source("~/Desktop/DATA/Flux/tools/reference/site_metadata.R")
-source("~/Desktop/DATA/Flux/tools/reference/essential_vars.R")
+source("/Users/Graham/Desktop/DATA/Flux/tools/reference/site_metadata.R")
+source("/Users/Graham/Desktop/DATA/Flux/tools/reference/essential_vars.R")
+
+# Load RFlux functions
+# TODO these need to be re-written and included in this script
+devtools::load_all("/Users/Graham/Desktop/DATA/Flux/tools/RFlux", quiet = TRUE)
 
 # Load functions
-source("~/Desktop/DATA/Flux/tools/engine/functions/clean.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/dates_and_times.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/flag.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/latest_version.R")
-source("~/Desktop/DATA/Flux/tools/engine/functions/utilities.R")
+path_funs <- "/Users/Graham/Desktop/DATA/Flux/tools/engine/functions"
+source(file.path(path_funs, "clean.R"))
+source(file.path(path_funs, "dates_and_times.R"))
+source(file.path(path_funs, "flag.R"))
+source(file.path(path_funs, "latest_version.R"))
+source(file.path(path_funs, "utilities.R"))
 
 
 ### Helper functions ===========================================================
@@ -45,7 +50,9 @@ md <- purrr::pluck(site_metadata, settings$site)
 
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
-wd <- file.path("~/Desktop", "DATA", "Flux", settings$site, settings$year)
+wd <- file.path(
+  "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
+)
 path_in <- file.path(wd, "processing", "04_biomet_gapfill", "data")
 ep_path_in <- file.path(wd, "processing", "01_combine_eddypro")
 fp_path_in <- file.path(wd, "processing", "05_footprint", "stats")
@@ -76,7 +83,7 @@ path_out <- file.path(wd, "processing", "06_flux_qc")
 
 ### Load required input data ===================================================
 
-cat("Importing data files.\n")
+cat("Importing data.\n")
 
 # Load the data
 data <- readr::read_csv(
@@ -98,10 +105,6 @@ data <- dplyr::left_join(data, fp, by = "timestamp")
 
 ### Error levels ===============================================================
 
-# Load RFlux functions
-# TODO these need to be re-written and included in this script
-devtools::load_all("~/Desktop/DATA/Flux/tools/RFlux", quiet = TRUE)
-
 # Create workset for RFlux input
 # - this just gathers data so doesn't need to be written to file
 workset <- ecworkset(ep_path, qc_path, md_path, st_path)
@@ -114,7 +117,7 @@ workset <- workset %>%
   # Add gap-filled rain data
   dplyr::bind_cols(dplyr::select(data, p_rain_f)) %>%
   dplyr::mutate(dplyr::across(
-    c(H, LE, CO2flux, CH4flux, CO2str, CH4str),
+    c(H, LE, co2_flux, ch4_flux, co2_strg, ch4_strg),
     ~ dplyr::if_else(!is.na(p_rain_f) & p_rain_f != 0, NA_real_, .x)
   )) %>%
   dplyr::select(-p_rain_f)
@@ -240,21 +243,21 @@ data_c %>%
 data_c %>% 
   mutate(
     fc = clean(fc, qc_fc),
-    qc = factor(pull(data, fc_randunc_hf) > 10)
+    qc = factor(pull(data, fc_randunc_hf) > 5)
   ) %>%
   ggplot(aes(timestamp, fc, color = qc)) +
   geom_point()
 data_c %>% 
   mutate(
     fch4 = clean(fch4, qc_fch4),
-    qc = factor(pull(data, fch4_randunc_hf) > 0.2)
+    qc = factor(pull(data, fch4_randunc_hf) > 0.1)
   ) %>%
   ggplot(aes(timestamp, fch4, color = qc)) +
   geom_point()
 data_c <- data_c %>%
-  mutate(
-    fc_rand_unc = pull(data, fc_randunc_hf),
-    fch4_rand_unc = pull(data, fch4_randunc_hf),
+  dplyr::mutate(
+    fc_rand_unc = dplyr::pull(data, fc_randunc_hf),
+    fch4_rand_unc = dplyr::pull(data, fch4_randunc_hf),
     
     fc_unc_flag = flag_thr(fc_rand_unc, 5, "higher"),
     fch4_unc_flag = flag_thr(fch4_rand_unc, 0.1, "higher")
@@ -286,19 +289,26 @@ data_c %>%
 
 data_c <- data_c %>%
   dplyr::mutate(
-    phi = dplyr::pull(fp, phi_k15),
-    phi_flag = flag_thr(phi, 0.80, "lower")
+    phi_k15 = dplyr::pull(fp, phi_k15),
+    phi_km01 = dplyr::pull(fp, phi_km01),
+    
+    phi_k15_flag = flag_thr(phi_k15, 0.80, "lower"),
+    phi_km01_flag = flag_thr(phi_km01, 0.80, "lower")
   )
 
+# Select necessary information from QC results, bind to main data frame
+data_full <- data_c %>%
+  dplyr::select(
+    timestamp, qc_h, qc_le, qc_fc, qc_fch4, fc_unc_flag, fch4_unc_flag, 
+    phi_k15_flag, phi_km01_flag, foot_flag
+  ) %>%
+  dplyr::left_join(data, ., by = "timestamp")
 
-clean_st %>%
-  mutate(timestamp = ymd_hm(TIMESTAMP_END)) %>%
-  bind_cols(select(site, phi, phi_ffp, night, fc_ss, fch4_randunc_hf)) %>%
-  #filter(NEE_DATA_FLAG != 2, NEE_OUTLYING_FLAG != 1) %>%
-  drop_na(NEE) %>% filter(phi_ffp > 0.80) %>% 
-  group_by(night) %>% 
-  summarize(
-    low = quantile(NEE, c(0.005, 0.995), na.rm = TRUE)[1], 
-    high = quantile(NEE, c(0.005, 0.995), na.rm = TRUE)[2]
-  )
+# Write output to file
+data_full_out <- file.path(
+  path_out, "data", paste0("flux_qc_full_", tag_out, ".csv")
+)
+readr::write_csv(data_full, data_full_out)
+
+
 
