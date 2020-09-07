@@ -9,34 +9,35 @@
 # Output(s):
 
 rm(list = ls())
+.rs.restartR()
 settings <- list(
   name = "Graham Stewart", # user who ran the script
   email = "grahamstewart12@gmail.com", # user's email contact
   site = "JLN", # three letter site code
   year = 2019, # four digit year
+  dir = "/Users/Graham/Desktop/DATA", # where all data can be found
   date = lubridate::today(), # date script was run
   info = devtools::session_info() # R session info: R, OS, packages
 )
 
 control <- list(
   fp_model = "K15",
-  features = c("ndvi", "ndwi", "z_max", "i_vp", "rn_vp"),
-  phi = 0.85
+  features = c("ndvi", "ndwi", "z_max", "i_vp"),
+  grid_width = 50,
+  phi = 0.85,
+  # Water level of flooded/dry threshold 
+  flood_depth = -0.10
 )
 
 # Load the required packages
-devtools::load_all("/Users/Graham/R Projects/footprints")
+devtools::load_all("~/Projects/flux/footprints")
+devtools::load_all("~/Projects/flux/dscalr")
 library(progress)
 library(lubridate)
 library(tidyverse)
 
 # Load reference files
 source("/Users/Graham/Desktop/DATA/Flux/tools/reference/site_metadata.R")
-
-# Load functions
-path_funs <- "/Users/Graham/Desktop/DATA/Flux/tools/engine/functions"
-source(file.path(path_funs, "latest_version.R"))
-source(file.path(path_funs, "utilities.R"))
 
 
 ### Helper functions ===========================================================
@@ -46,9 +47,10 @@ progress_info <- function(len) {
   progress_bar$new(
     total = len, 
     format = paste0(
-      "[:spin] Completed: :current (:percent)  ", 
+      "[:spin] Completed: :current | :percent  ", 
       "Elapsed: :elapsed  Remaining: :eta"
-    )
+    ),
+    clear = FALSE
   )
 }
 
@@ -77,78 +79,18 @@ cross_grids <- function(...) {
   matrix(crossed, nrow = dims[1], ncol = dims[2])
 }
 
-cut_circle <- function(x, n_perim = 4, n_radius = 1) {
-  
-  center <- sf::st_centroid(x)
-  
-  circle_points <- x %>% 
-    sf::st_cast("MULTIPOINT") %>% 
-    sf::st_sfc() %>% 
-    sf::st_cast("POINT") %>%
-    sf::st_sf() 
-  
-  seg <- circle_points %>%
-    dplyr::mutate(quad = rep(seq(1, n_perim), each = 360 / n_perim)) %>%
-    dplyr::group_by(quad) %>%
-    dplyr::slice((360 / n_perim / 2) + 1) %>% 
-    dplyr::ungroup() %>%
-    sf::st_cast("MULTIPOINT") %>% 
-    dplyr::mutate(seg = purrr::map(geometry, ~ c(., center))) %>% 
-    dplyr::pull(seg) %>% 
-    sf::st_sfc() %>% 
-    sf::st_cast("LINESTRING") %>%
-    sf::st_cast("MULTILINESTRING") %>% 
-    sf::st_line_merge() %>%
-    sf::st_combine()
-  
-  perim_cut <- x %>%
-    lwgeom::st_split(seg) %>% 
-    sf::st_collection_extract()
-  
-  if (n_radius == 1) {
-    return(sf::st_sf(perim_cut))
-  }
-  
-  cookie_cutter <- function(x, y) {
-    sf::st_collection_extract(lwgeom::st_split(x, y))
-  }
-  
-  radius <- calc_radius(x)
-  
-  radii <- seq(0.5, radius, length.out = n_radius + 1)
-  inside_radii <- radii[-c(1, length(radii))]
-  
-  radius_cut <- inside_radii %>%
-    purrr::map(~ sf::st_buffer(center, .x, nQuadSegs = 360 / n_perim)) %>% 
-    purrr::map(sf::st_cast, "LINESTRING") %>%
-    purrr::reduce(cookie_cutter, .init = perim_cut)
-  
-  sector_names <- stringr::str_c(
-    rep(c("E", "S", "W", "N"), each = n_radius),
-    rep(1:n_radius, times = n_perim)
-  )
-  
-  radius_cut %>%
-    sf::st_sf() %>%
-    dplyr::rename(geometry = 1) %>%
-    dplyr::mutate(
-      id = dplyr::row_number(), 
-      sector = sector_names,
-      .before = 1
-    )
-}
+
 
 
 ### Initialize script settings & documentation =================================
 
 # Load metadata file
 md <- purrr::pluck(site_metadata, settings$site)
+elev_corr <- md$rel_elev_well
 
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
-wd <- file.path(
-  "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
-)
+wd <- file.path(settings$dir, "Flux", settings$site, settings$year)
 path_spatial <- file.path(dirname(wd), "analysis", "spatial")
 path_in <- file.path(wd, "processing", "05_footprint")
 
@@ -159,7 +101,7 @@ paths <- list(
     paste0(settings$site, "_", settings$year, ".csv")
   ),
   # Cover type raster
-  class = file.path(path_spatial, "07_classification", "classes_ens.tif"),
+  class = file.path(path_spatial, "07_classification", "classes_rev.tif"),
   # Relative elevation raster
   elev = file.path(path_spatial, "08_relative_elevation", "rel_elev.tif"),
   # Other spatial features
@@ -184,13 +126,13 @@ tag_out <- create_tag(settings$site, settings$year, settings$date)
 
 # Import water level data
 data_wtd <- readr::read_csv(
-  paths$wtd, guess_max = 6000, 
+  paths$wtd, guess_max = 7000, 
   col_types = readr::cols(.default = readr::col_guess())
 )
 
 # Import footprint phi data
 data_phi <- readr::read_csv(
-  paths$phi, guess_max = 6000, 
+  paths$phi, guess_max = 7000, 
   col_types = readr::cols(.default = readr::col_guess())
 )
 
@@ -226,50 +168,37 @@ class_grid <- class %>%
   snap_to_grid(grid, c(md$x_utm, md$y_utm)) %>%
   with_matrix(~ as.integer(.x))
 elev_grid <- snap_to_grid(rel_elev, grid, c(md$x_utm, md$y_utm))
-feat_grid <- purrr::map(feat, ~ snap_to_grid(.x, grid, c(md$x_utm, md$y_utm)))
+feat_grid <- feat %>%
+  purrr::map(~ snap_to_grid(.x, grid, c(md$x_utm, md$y_utm))) %>%
+  purrr::prepend(list(rel_elev = elev_grid))
 
 # Create key for combined cover types & flooding
-key <- class_key %>% 
+classflood_key <- class_key %>% 
   purrr::map(~ .x * flood_key) %>% 
   purrr::imap(~ rlang::set_names(.x, stringr::str_c(.y, "_", names(.)))) %>%
   purrr::flatten() %>%
   purrr::simplify()
 
 # Split site grid into objective quadrants
-# - is it problematic to split radial quadrants, since not all same area??
-# - I think yes
-# quad <- sf::st_point(c(md$x_utm, md$y_utm)) %>%
-#   # Important to set nQuadSegs to 90 so that each point = 1 degree
-#   sf::st_buffer(500.5, nQuadSegs = 90) %>% 
-#   cut_circle(n_perim = 4, n_radius = 10) %>% 
-#   sf::st_set_crs(sf::st_crs(delin)) %>% 
-#   stars::st_rasterize(dx = 1, dy = 1) %>%
-#   # TODO make this not depend on 'class' being on the correct grid
-#   stars::st_warp(stars::st_as_stars(class))
-# which_quads <- quad %>% 
-#   tibble::as_tibble() %>% 
-#   dplyr::distinct(id) %>% 
-#   dplyr::pull(id)
-# # Create named key for quadrants
-# quad_key <- c("e", "s", "w", "n") %>% 
-#   rep(each = 10) %>% 
-#   stringr::str_c(rep(rev(1:10), times = dplyr::n_distinct(.))) %>% 
-#   rlang::set_names() %>%
-#   purrr::map2(seq_along(.), ~ .y) %>%
-#   purrr::keep(~ .x %in% which_quads) %>%
-#   purrr::simplify()
-# quad_grid <- as_matrix(quad)
-
-# Split site grid into objective quadrants
-quad_grid <- cut_grid(grid, width = 50)
-# Create named key for quadrants
-quad_key <- quad_grid %>%
-  magrittr::multiply_by(grid$aoi) %>%
-  as.vector() %>%
-  vctrs::vec_unique() %>%
-  purrr::discard(~ .x == 0) %>%
-  rlang::set_names(stringr::str_c("q", .))
-
+quad_grid <- with_matrix2(
+  sign(grid$x), sign(grid$y), 
+  ~ dplyr::case_when(
+    .x ==  1 & .y ==  1 ~ 1,
+    .x == -1 & .y ==  1 ~ 2,
+    .x == -1 & .y == -1 ~ 3,
+    .x ==  1 & .y == -1 ~ 4
+  )
+)
+quad_key <- c(q1 = 1, q2 = 2, q3 = 3, q4 = 4)
+quad_cover <- quad_grid %>% 
+  with_matrix2(class_grid, ~ forcats::fct_cross(factor(.x), factor(.y))) %>% 
+  with_matrix(~ as.integer(factor(.x))) 
+quadclass_key <- quad_cover %>% 
+  as.vector() %>% unique() %>% sort() %>%
+  rlang::set_names(paste(
+    rep(names(quad_key), each = length(class_key)), names(class_key), 
+    sep = "_"
+  ))
 
 ### Retrieve footprints, calculate cover =======================================
 
@@ -288,13 +217,6 @@ fp_files <- paths$fp %>%
       lubridate::ymd_hms(),
     .before = 1
   ) %>%
-  # Join phi data
-  dplyr::left_join(
-    dplyr::select(data_phi, timestamp, phi = 2), by = "timestamp"
-  ) %>%
-  # Subset footprints with phi above threshold
-  dplyr::filter(phi >= control$phi) %>%
-  dplyr::select(-phi) %>%
   tibble::deframe()
 
 fp_timestamps <- fp_files %>% names() %>% lubridate::ymd_hms()
@@ -316,56 +238,54 @@ p <- progress_info(n_fp)
 for (i in 1:n_fp) {
   
   # Read and scale footprint matrix
-  fp_temp <- read_matrix(fp_files[i], trunc = 9) # 6.61 ms
+  fp_temp <- read_matrix(fp_files[i], trunc = 9)
 
   # Mask integrated footprint to account for rapid expansion approaching 100%
   # - recommended: between 80% and 90% (Kljun et al. 2015)
-  # - this means data should be first filtered for phi >= p
-  fp_mask <- mask_source_area(fp_temp, p = control$phi, mask_value = 0) # 4.17 ms
-  fp_mask <- fp_mask * grid$aoi # 0.192 ms
+  # - this means data should be filtered for phi >= p
+  fp_mask <- mask_source_area(fp_temp, p = control$phi, mask_value = 0)
+  fp_mask <- fp_mask * grid$aoi
   
   # Normalize integrated footprint to 1 (Tuovinen et al. 2019)
   # - the masked footprint is thus considered the 100% analytical footprint
-  fp_norm <- fp_mask / sum(fp_mask)
+  phi_sum <- sum(fp_mask)
+  fp_norm <- fp_mask / phi_sum
   
   # Calculate water level over AOI
   # - as depth relative to land surface (negative = water below surface)
   # - give wtd a placeholder value if NA so that other covers can be summed
   aoi_wtd <- md$rel_elev_well + tidyr::replace_na(wtd[i], 0.1) - elev_grid
   # Classify flooded area (1 = wet, 0 = dry)
-  aoi_flooded <- with_matrix(aoi_wtd, ~ dplyr::if_else(.x >= 0, 1, 0)) 
-  # aoi_flooded <- sign(aoi_wtd)
+  aoi_flooded <- with_matrix(
+    aoi_wtd, ~ dplyr::if_else(.x >= control$flood_depth, 1, 0)
+  ) 
   
-  # Can use cross_grids() if want to combine more than 2 matrices
-  # - this is kind of awkward but flexible
-  # - automatically detects if one matrix is all NA and drops it
-  # - ensures that all cells are classified properly
-  #aoi_cover <- cross_grids(class_grid, aoi_flooded) # 5.52 ms
   # For cover classes, flooded is classified as (1 = wet, -1 = dry)
   aoi_cover <- class_grid * sign(aoi_wtd)
   
   # Calculate cover-type weights
-  cover_wt <- summarize_cover(fp_norm, aoi_cover, levels = key) # 3.79 ms
+  cover_wt <- summarize_cover(fp_norm, aoi_cover, levels = classflood_key)
   
   # Calculate quadrant weights
-  quad_wt <- summarize_cover(fp_norm, quad_grid, levels = quad_key) # 3.79 ms
+  quad_wt <- summarize_cover(fp_norm, quad_cover, levels = quadclass_key)
   
   # Calculate footprint-weighted WTD & flooded area
-  wtd_wt <- summarize_cover(fp_norm, aoi_wtd, type = "numeric") # 0.605 ms
-  flood_wt <- summarize_cover(fp_norm, aoi_flooded, type = "numeric") # 0.605 ms
+  wtd_wt <- summarize_cover(fp_norm, aoi_wtd, type = "numeric")
+  flood_wt <- summarize_cover(fp_norm, aoi_flooded, type = "numeric")
   feat_wt <- feat_grid %>%
     purrr::map(~ summarize_cover(fp_norm, .x, type = "numeric")) %>%
     purrr::simplify()
   
   # Add all weights to list 
   cover[[i]] <- c(
-    cover_wt, "wtd_wt" = wtd_wt, "flood_wt" = flood_wt, feat_wt, quad_wt
+    phi_mask = phi_sum, cover_wt, "wtd_wt" = wtd_wt, "flood_wt" = flood_wt, 
+    feat_wt, quad_wt
   )
 
   p$tick()
 }
 
-# Gather everything into one data frame
+# Gather everything into one data frame (this is very slow)
 data_cover <- cover %>%
   dplyr::bind_rows() %>%
   dplyr::mutate(timestamp = fp_timestamps) %>%
@@ -384,33 +304,44 @@ data_cover_all <- data_cover %>%
     frs = frs_wet + frs_dry,
     wet = wtr_wet + veg_wet + frs_wet,
     dry = wtr_dry + veg_dry + frs_dry,
+    q1 = q1_wtr + q1_veg + q1_frs,
+    q2 = q2_wtr + q2_veg + q2_frs,
+    q3 = q3_wtr + q3_veg + q3_frs,
+    q4 = q4_wtr + q4_veg + q4_frs,
     .after = 1
   ) %>%
   # Set wet/dry covers to NA if WTD was missing
   dplyr::mutate(dplyr::across(
     c(dplyr::ends_with("wet"), dplyr::ends_with("dry")), 
     ~ dplyr::if_else(is.na(wtd), NA_real_, .x)
-  )) %>%
-  dplyr::select(-wtd)
+  ))
 
 # Peek distributions
 data_cover_all %>%
-  ggplot2::ggplot(ggplot2::aes(frs)) +
-  ggplot2::geom_density(na.rm = TRUE)
+  tidyr::pivot_longer(c(wet, dry)) %>%
+  ggplot2::ggplot(ggplot2::aes(value, fill = name)) +
+  ggplot2::geom_density(na.rm = TRUE, alpha = 0.6)
+
+data_cover_all %>%
+  dplyr::summarize(
+    dplyr::across(c(-timestamp, -phi_mask), sum, na.rm = TRUE)
+  ) %>%
+  tidyr::pivot_longer(dplyr::everything())
 
 # Quadrant weights
 ggplot2::ggplot() + 
   stars::geom_stars(
     data = quad_grid %>% 
-      t() %>% 
+      apply(2, rev) %>% t() %>%
       stars::st_as_stars() %>% 
       tibble::as_tibble(center = FALSE) %>% 
       dplyr::left_join(
         data_cover_all %>% 
-          dplyr::select(dplyr::starts_with("q")) %>% 
+          dplyr::filter(phi_mask > 0.8) %>%
+          dplyr::select(q1, q2, q3, q4) %>% 
           dplyr::summarize(dplyr::across(.fns = ~ sum(.x, na.rm = TRUE))) %>% 
-          tidyr::pivot_longer(dplyr::everything()) %>% 
-          dplyr::mutate(name = dplyr::recode(name, !!!quad_key)), 
+          tidyr::pivot_longer(dplyr::everything()) %>%
+          dplyr::mutate(name = as.numeric(stringr::str_remove_all(name, "q"))),
         by = c("A1" = "name")
       ) %>% 
       dplyr::select(-A1) %>% 
