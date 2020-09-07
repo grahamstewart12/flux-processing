@@ -46,7 +46,7 @@ library(tidyverse)
 source("/Users/Graham/Desktop/DATA/Flux/tools/reference/site_metadata.R")
 
 # Load functions
-path_funs <- "/Users/Graham/Desktop/DATA/Flux/tools/engine/functions"
+path_funs <- file.path(settings$dir, "Flux/tools/engine/functions")
 source(file.path(path_funs, "dates_and_times.R"))
 source(file.path(path_funs, "latest_version.R"))
 source(file.path(path_funs, "utilities.R"))
@@ -57,9 +57,9 @@ source(file.path(path_funs, "utilities.R"))
 progress_info <- function(len) {
   
   progress_bar$new(
-    total = len, 
+    total = len, clear = FALSE,
     format = paste0(
-      "[:spin] Completed: :current (:percent)  ", 
+      "[:spin] Completed: :current | :percent  ", 
       "Elapsed: :elapsed  Remaining: :eta"
     )
   )
@@ -73,9 +73,7 @@ md <- purrr::pluck(site_metadata, settings$site)
 
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
-wd <- file.path(
-  "/Users/Graham/Desktop", "DATA", "Flux", settings$site, settings$year
-)
+wd <- file.path(settings$dir, "Flux", settings$site, settings$year)
 
 paths <- list(
   # Input file - gap-filled biomet
@@ -109,7 +107,7 @@ delin <- sf::read_sf(paths$delin)
 
 # Load the data
 data <- readr::read_csv(
-  paths$data, guess_max = 6000, 
+  paths$data, guess_max = 7000, 
   col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
 )
 # Force local time zone to align properly with external data
@@ -139,9 +137,9 @@ noaa <- noaa %>%
 data <- data %>%
   # Roughness parameters
   dplyr::mutate(
-    zm = md$tower_height,
+    z = md$tower_height,
     zd = md$displacement,
-    zo = md$roughness_length
+    z0 = md$roughness_length
   ) %>%
   # ERA
   dplyr::left_join(era, by = "timestamp") %>%
@@ -161,32 +159,85 @@ if (control$fetch) {
   
   cat("Calculating half-hourly fetch lengths.\n")
   
-  # Calculate half-hourly fetch lengths
-  fetch <- fp_fetch(
-    data, ws = "ws", ustar = "ustar", zeta = "zl", mo_length = "mo_length",
-    z = md$tower_height, zd = md$displacement, zo = md$roughness_length, 
-    percent = c(10, 30, 50, 70, 90, "peak"), method = control$fetch_model
+  # Select model function and parameters
+  fetch_ref <- list(
+    K15 = list(
+      fun = calc_fetch_kljun, 
+      vars = c("ustar", "mo_length", "blh", "z0")
+    )
   )
   
-  # Rename with method ID tag
-  fetch <- dplyr::rename_with(
-    fetch, ~ stringr::str_c(.x, tolower(control$fetch_model))
+  fetch_ref <- purrr::pluck(fetch_ref, control$fetch_model)
+  
+  # Add WS to model vars if specified
+  if (control$fetch_model == "K15" & control$use_ws) {
+    #control$fp_model <- "K15_ws"
+    fetch_ref <- purrr::list_merge(fetch_ref, vars = "ws")
+  }
+  
+  # Select only necessary variables, remove missing data
+  data_fetch <- data %>% 
+    # Filter out erroneous wind records
+    dplyr::filter(qc_ws == 0) %>%
+    dplyr::select(timestamp, z, zd, dplyr::all_of(fetch_ref$vars)) %>%
+    tidyr::drop_na()
+  
+  # Copy data into list (easier to access in loop)
+  data_fetch_list <- data_fetch %>%
+    dplyr::select(-timestamp) %>%
+    as.list()
+  
+  # Initialize loop for fetch calculation
+  n_fetch <- nrow(data_fetch)
+  fetch_list <- vctrs::vec_init(list(), n_fetch)
+  p <- progress_info(n_fetch)
+  
+  # Apply one-dimensional footprint model to data
+  for (i in 1:n_fetch) {
+    
+    # Get parameters from data list
+    fetch_args <- data_fetch_list %>% 
+      purrr::modify(i) %>% 
+      # Splice in percents
+      purrr::prepend(list(pct = control$fetch_pct, dx = control$fetch_dx))
+    
+    # Calculate fetch lengths
+    fetch_list[[i]] <- rlang::exec(fetch_ref$fun, !!!fetch_args)
+    
+    p$tick()
+  }
+  
+  fetch <- fetch_list %>%
+    dplyr::bind_rows() %>%
+    dplyr::bind_cols(dplyr::select(data_fetch, timestamp), .) %>%
+    dplyr::right_join(dplyr::select(data, timestamp), by = "timestamp") %>%
+    dplyr::arrange(timestamp)
+  
+  fetch_out <- file.path(
+    paths$out, "fetch", 
+    paste0("fetch_", control$fetch_model, "_", tag_out, ".csv")
   )
-  
-  fetch <- dplyr::bind_cols(dplyr::select(data, timestamp), fetch)
-  
-  fetch_out <- file.path(paths$out, "fetch", paste0("fetch_", tag_out, ".csv"))
   readr::write_csv(fetch, fetch_out)
   
   # Create documentation for fetch output
   fetch_docu <- settings
-  fetch_docu$files <- c(paths$data)
-  fetch_docu$method <- control$fetch_model
+  fetch_docu <- append(
+    settings, list(
+      files = c(paths$data, paths$era),
+      model_params = list(
+        model = control$fetch_model, 
+        roughness = if ("z0" %in% fetch_ref$vars) "z0" else "ws/ustar",
+        percents = control$fetch_pct
+      )
+    )
+  )
   fetch_docu_out <- stringr::str_replace(fetch_out, ".csv", ".txt")
   # Save documentation
   sink(fetch_docu_out)
   print(fetch_docu) 
   sink()
+  
+  cat("\n")
 }
 
 
@@ -198,7 +249,7 @@ if (control$fp) {
   model_ref <- list(
     H00 = list(
       fun = calc_footprint_hsieh, 
-      vars = c("ustar", "mo_length", "v_sigma", "zo")
+      vars = c("ustar", "mo_length", "v_sigma", "z0")
     ),
     KM01 = list(
       fun = calc_footprint_kormann, 
@@ -206,7 +257,7 @@ if (control$fp) {
     ),
     K15 = list(
       fun = calc_footprint_kljun, 
-      vars = c("ustar", "mo_length", "v_sigma", "blh", "zo")
+      vars = c("ustar", "mo_length", "v_sigma", "blh", "z0")
     )
   )
   
@@ -214,6 +265,7 @@ if (control$fp) {
   
   # Add WS to model vars if specified
   if (control$fp_model == "K15" & control$use_ws) {
+    #control$fp_model <- "K15_ws"
     model_ref <- purrr::list_merge(model_ref, vars = "ws")
   }
   
@@ -236,8 +288,8 @@ if (control$fp) {
   data_fp <- data %>% 
     # Filter out erroneous wind records
     dplyr::filter(qc_ws == 0, qc_wd == 0) %>%
-    # All models need zm, zd, and wd
-    dplyr::select(timestamp, zm, zd, wd, dplyr::all_of(model_ref$vars)) %>%
+    # All models need z, zd, and wd
+    dplyr::select(timestamp, z, zd, wd, dplyr::all_of(model_ref$vars)) %>%
     tidyr::drop_na()
   
   # Copy data into list (easier to access in footprint loop)
@@ -246,24 +298,9 @@ if (control$fp) {
     as.list()
   
   # Set up grid
-  #grid <- grid_init(fetch = (md$tower_height - md$displacement) * 100)
-  
-  # Convert AOI to grid
-  #aoi_grid <- aoi_to_grid(delin, grid, c(md$x_utm, md$y_utm))
-  
-  # Extent of AOI for trimming footprint grid
-  #extent_trim <- get_trim_extent(aoi_grid)
-  
-  # Trim grid to AOI area
-  # - no need to calculate footprint weights outside of AOI 
-  # - these are implicit in phi
-  #grid <- purrr::map(grid, trim_matrix, extent_trim)
-  
-  # Trim AOI
-  #aoi_grid <- trim_matrix(aoi_grid)
-  
   grid <- aoi_to_grid(delin, c(md$x_utm, md$y_utm), delta = 1)
   
+  # Convert AOI to grid
   aoi_grid <- aoi_to_mask(delin, c(md$x_utm, md$y_utm), delta = 1)
   
   # Write grid to file
@@ -366,40 +403,51 @@ if (control$fp) {
     )
   
   # Compute model-specific validity flags
-  if (control$fp_model == "K15") {
+  if (stringr::str_detect(control$fp_model, "K15")) {
+    
     # Indicate whether footprint is valid according to Kljun et al. 2015
     fp_stats <- fp_stats %>%
       dplyr::right_join(
-        dplyr::select(data, timestamp, ustar, mo_length, blh, zm, zd, zo), 
+        dplyr::select(data, timestamp, ustar, mo_length, blh, ws, z, zd, z0), 
         by = "timestamp"
-      ) %>%
+      )
+    
+    if (control$use_ws) {
+      fp_stats <- dplyr::mutate(
+        fp_stats, z0 = calc_z0(ws, ustar, mo_length, z - zd)
+      )
+    }
+    
+    fp_stats <- fp_stats %>%
       dplyr::arrange(timestamp) %>%
       dplyr::mutate(
-        z = zm - zd,
+        zm = z - zd,
+        # TODO fix this
         k15_valid = dplyr::case_when(
           ustar < 0.1 ~ 0L,
-          z / mo_length < -15.5 ~ 0L,
-          20 * zo >= z ~ 0L,
-          z < 0.8 * blh ~ 0L,
+          zm / mo_length > -15.5 ~ 0L,
+          # Using roughness sublayer limit as in latest FFP version, not paper
+          12.5 * z0 >= zm ~ 0L,
+          zm > 0.8 * blh ~ 0L,
           is.na(phi_k15) ~ NA_integer_,
           TRUE ~ 1L
         )
       ) %>%
-      dplyr::select(-z, -zm, -zd, -zo, -ustar, -mo_length, -blh)
+      dplyr::select(-ustar, -mo_length, -ws)
   }
   
   if (control$fp_model == "KM01") {
     # Indicate whether footprint is valid according to Kormann & Meixner 2001
     fp_stats <- fp_stats %>%
       dplyr::right_join(
-        dplyr::select(data, timestamp, mo_length, zm, zd), by = "timestamp"
+        dplyr::select(data, timestamp, mo_length, z, zd), by = "timestamp"
       ) %>%
       dplyr::arrange(timestamp) %>%
       dplyr::mutate(
-        z = zm - zd,
-        km01_valid = dplyr::if_else(abs(z / mo_length) > 3, 0L, 1L)
+        zm = z - zd,
+        km01_valid = dplyr::if_else(abs(zm / mo_length) > 3, 0L, 1L)
       ) %>%
-      dplyr::select(-z, -zm, -zd, -mo_length)
+      dplyr::select(-z, -zm, -zd)
   }
   
   fp_stats_out <- file.path(
@@ -415,7 +463,7 @@ if (control$fp) {
       files = c(paths$data, paths$era, paths$delin),
       model_params = list(
         model = control$fp_model, 
-        roughness = if ("zo" %in% model_ref$vars) "zo" else "ws/ustar",
+        roughness = if ("z0" %in% model_ref$vars) "z0" else "ws/ustar",
         fetch = attr(grid, "fetch"), 
         res = attr(grid, "res")
       )
