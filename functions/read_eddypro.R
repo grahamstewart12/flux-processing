@@ -3,7 +3,7 @@
 source("~/Desktop/DATA/Flux/tools/engine/functions/attributes.R")
 
 read_eddypro <- function(file, timestamp = paste(date, time), units = TRUE, 
-                         units_fill = "-", skip = 0, ...) {
+                         units_fill = "-", skip = 0, guess_max = 7000, ...) {
   
   timestamp <- rlang::enexpr(timestamp)
   
@@ -16,33 +16,45 @@ read_eddypro <- function(file, timestamp = paste(date, time), units = TRUE,
   
   # This code is an experimental adaptation of openeddy function
   # - but it WORKS
-  var_units <- readr::read_csv(
-    file, col_names = TRUE,
-    col_types = readr::cols(.default = readr::col_character()),
-    na = na_strings, skip = skip, n_max = 1, ...
-  )
+  # var_units <- readr::read_csv(
+  #   file, col_names = TRUE,
+  #   col_types = readr::cols(.default = readr::col_character()),
+  #   na = na_strings, skip = skip, n_max = 1, ...
+  # )
 
   orig_varnames <- readr::read_csv(
     file, col_names = FALSE,
     col_types = readr::cols(.default = readr::col_character()), 
     na = na_strings, skip = skip, n_max = 1, ...
   )
-  
+  #browser()
   if (units) {
+    var_units <- file %>%
+      purrr::quietly(readr::read_csv)(
+        col_names = TRUE, 
+        col_types = readr::cols(.default = readr::col_character()),
+        na = na_strings, skip = skip, n_max = 1, ...
+      ) %>% 
+      purrr::pluck("result") %>% 
+      rlang::set_names(
+        vctrs::vec_as_names(names(.), repair = "universal", quiet = TRUE)
+      )
     read_names <- colnames(var_units)
     var_units[var_units %in% c("", NA)] <- units_fill
     skip <- skip + 2
   } else {
-    var_units[] <- units_fill
+    #var_units[] <- units_fill
+    var_units <- list(rep(units_fill, ncol(orig_varnames)))
     read_names <- TRUE
-    skip <- 1 + skip
   }
   
-  data <- readr::read_csv(
-    file, col_names = read_names,
-    col_types = readr::cols(.default = readr::col_guess()), 
-    na = na_strings, skip = skip, guess_max = 6000, progress = FALSE, ...
-  )
+  data <- file %>%
+    purrr::quietly(readr::read_csv)(
+      col_names = read_names,
+      col_types = readr::cols(.default = readr::col_guess()), 
+      na = na_strings, skip = skip, guess_max = guess_max, progress = FALSE, ...
+    ) %>%
+    purrr::pluck("result")
   
   orders <- c("YmdHM", "YmdHMS", "mdyHM", "mdyHMS")
   
@@ -75,12 +87,25 @@ read_eddypro_settings <- function(file) {
     purrr::map(readr::parse_guess)
 }
 
+ghg_has_biomet <- function(file) {
+  
+  contents <- unzip(file, list = TRUE)
+  any(stringr::str_detect(contents$Name, "biomet.data"))
+}
+
 read_ghg <- function(file, ext = c("data", "metadata"), biomet = FALSE, ...) {
   
   ext <- rlang::arg_match(ext)
   ext <- stringr::str_c(".", ext)
   
   if (biomet) {
+    
+    # Check if there is a biomet file
+    biomet_exists <- ghg_has_biomet(file)
+    if (!biomet_exists) {
+      stop(".ghg file does not contain biomet data.", call. = FALSE)
+    }
+    
     ext <- stringr::str_c("-biomet", ext)
     nl <- 5
     col_spec <- readr::cols_only(
@@ -124,14 +149,23 @@ read_ghg <- function(file, ext = c("data", "metadata"), biomet = FALSE, ...) {
   }
   
   name <- basename(file)
-  file_con <- unz(file, stringr::str_replace(name, ".ghg", ext))
+  #file_con <- unz(file, stringr::str_replace(name, ".ghg", ext))
   #on.exit(closeAllConnections())
-  
-  out <- readr::read_tsv(
-    file_con,
+  #browser()
+  # out <- readr::read_tsv(
+  #   unz(file, stringr::str_replace(name, ".ghg", ext)),
+  #   col_types = col_spec,
+  #   na = c("", "NA", "-9999"),
+  #   skip = nl,
+  #   progress = FALSE,
+  #   ...
+  # )
+  out <- vroom::vroom(
+    unz(file, stringr::str_replace(name, ".ghg", ext)), 
+    delim = "\t", 
     col_types = col_spec,
-    na = c("", "NA", "-9999"),
-    skip = nl,
+    na = c("", "NA", "-9999"), 
+    skip = nl, 
     progress = FALSE,
     ...
   )
