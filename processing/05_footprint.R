@@ -37,19 +37,11 @@
 # Output(s):
 
 # Load the required packages
-devtools::load_all("/Users/Graham/R Projects/footprints", quiet = TRUE)
+devtools::load_all("~/Projects/Flux/footprints", quiet = TRUE)
+devtools::load_all("~/Projects/Flux/dscalr", quiet = TRUE)
 library(progress)
 library(lubridate, warn.conflicts = FALSE)
 library(tidyverse)
-
-# Load reference files
-source("/Users/Graham/Desktop/DATA/Flux/tools/reference/site_metadata.R")
-
-# Load functions
-path_funs <- file.path(settings$dir, "Flux/tools/engine/functions")
-source(file.path(path_funs, "dates_and_times.R"))
-source(file.path(path_funs, "latest_version.R"))
-source(file.path(path_funs, "utilities.R"))
 
 
 ### Helper functions ===========================================================
@@ -69,33 +61,30 @@ progress_info <- function(len) {
 ### Initialize script settings & documentation =================================
 
 # Load metadata file
-md <- purrr::pluck(site_metadata, settings$site)
+md <- yaml::read_yaml(file.path("data", settings$site, "metadata.yml"))
+
+# Set tag for file names
+tag <- make_tag(md$site_code, settings$year)
 
 # Set the desired working directory in RStudio interface
 # - assumes that the subdirectory structure is already present
-wd <- file.path(settings$dir, "Flux", settings$site, settings$year)
+wd <- file.path("data", settings$site, settings$year)
+path_in <- file.path(wd, "04_biomet_gapfill", "data")
+path_out <- file.path(wd, "05_footprint")
 
-paths <- list(
-  # Input file - gap-filled biomet
-  data = latest_version(
-    file.path(wd, "processing", "04_biomet_gapfill", "data")
-  ),
-  # Input file - processed ERA data for site location
-  era = latest_version(
-    file.path(dirname(dirname(wd)), "JLL", "all", "era"), "era_proc"
-  ),
-  # Input file - NOAA boundary layer height (/scripts/download_noaa_blh.R)
-  noaa = file.path(
-    dirname(dirname(wd)), "JLL", "all", "noaa", "noaa_blh_hh_interp.csv"
-  ),
-  # Site delineation polygon
-  delin = file.path(dirname(wd), "site_info", "delineation"),
-  # Output files
-  out = file.path(wd, "processing", "05_footprint")
+# Input file - gap-filled biomet
+file_data <- file.path(wd, path_in, paste0("biomet_gf_", tag, ".csv"))
+
+# Input file - site delineation polygon
+file_delin <- file.path(dirname(wd), "site_info", "delineation")
+
+# Input file - processed ERA data for site location
+era_files <- list.files(
+  "data/ERA", pattern = "era_proc.+.csv", recursive = TRUE, full.names = TRUE
 )
-  
-# Set tag for creating output file names
-tag_out <- create_tag(settings$site, settings$year, settings$date)
+
+# Load config for this script
+config <- yaml::read_yaml(file.path(path_out, "config.yml"))
 
 
 ### Load required input data ===================================================
@@ -103,59 +92,38 @@ tag_out <- create_tag(settings$site, settings$year, settings$date)
 cat("Importing data files.\n")
 
 # Import site delineation polygon
-delin <- sf::read_sf(paths$delin)
+delin <- sf::read_sf(file_delin)
 
 # Load the data
-data <- readr::read_csv(
-  paths$data, guess_max = 7000, 
-  col_types = readr::cols(.default = readr::col_guess()), progress = FALSE
-)
+data <- read_csv(file_data, show_col_types = FALSE, progress = FALSE)
 # Force local time zone to align properly with external data
-data <- dplyr::mutate(
-  data, timestamp = lubridate::force_tz(timestamp, md$tz_name)
-)
+data <- mutate(data, timestamp = force_tz(timestamp, md$tz$name))
 
-# Import ERA data, get variables
-era <- readr::read_csv(
-  paths$era, col_types = readr::cols(.default = readr::col_guess()), 
-  progress = FALSE
-)
-era <- era %>%
-  dplyr::mutate(timestamp = lubridate::with_tz(timestamp, md$tz_name)) %>%
-  dplyr::select(timestamp, blh_era = blh)
-
-# Import NOAA data
-noaa <- readr::read_csv(
-  paths$noaa, col_types = readr::cols(.default = readr::col_guess()), 
-  progress = FALSE
-)
-noaa <- noaa %>%
-  dplyr::mutate(timestamp = lubridate::with_tz(timestamp, md$tz_name)) %>%
-  dplyr::select(timestamp, blh_noaa = blh)
+# Load the ERA data library, get variables
+era <- era_files %>%
+  read_csv(show_col_types = FALSE, progress = FALSE) %>%
+  mutate(timestamp = with_tz(timestamp, md$tz$name)) %>%
+  select(timestamp, blh_era = blh)
 
 # Add external data to main data frame
 data <- data %>%
   # Roughness parameters
-  dplyr::mutate(
-    z = md$tower_height,
+  mutate(
+    z = md$tower$height,
     zd = md$displacement,
     z0 = md$roughness_length
   ) %>%
   # ERA
-  dplyr::left_join(era, by = "timestamp") %>%
+  left_join(era, by = "timestamp") %>%
   # Interpolate hourly -> half-hourly
-  dplyr::mutate(blh_era = imputeTS::na_interpolation(blh_era)) %>%
-  # NOAA (already interpolated)
-  dplyr::left_join(noaa, by = "timestamp") %>%
-  # Set primary BLH variable (ERA, since at finer spatial & temporal res)
-  dplyr::mutate(blh = blh_era) %>%
+  mutate(blh = imputeTS::na_interpolation(blh_era)) %>%
   # Force time zone back to UTC
-  dplyr::mutate(timestamp = lubridate::force_tz(timestamp, "UTC"))
+  mutate(timestamp = force_tz(timestamp, "UTC"))
 
 
 ### Calculate 1-D footprints (fetch lengths) ===================================
 
-if (control$fetch) {
+if (config$fetch) {
   
   cat("Calculating half-hourly fetch lengths.\n")
   
@@ -164,27 +132,35 @@ if (control$fetch) {
     K15 = list(
       fun = calc_fetch_kljun, 
       vars = c("ustar", "mo_length", "blh", "z0")
+    ),
+    KM01 = list(
+      fun = calc_fetch_kormann, 
+      vars = c("ws", "ustar", "mo_length", "z0")
+    ),
+    H00 = list(
+      fun = calc_fetch_hsieh, 
+      vars = c("mo_length", "z0")
     )
   )
   
-  fetch_ref <- purrr::pluck(fetch_ref, control$fetch_model)
+  fetch_ref <- pluck(fetch_ref, config$fetch_model)
   
   # Add WS to model vars if specified
-  if (control$fetch_model == "K15" & control$use_ws) {
-    #control$fp_model <- "K15_ws"
-    fetch_ref <- purrr::list_merge(fetch_ref, vars = "ws")
+  if (config$fetch_model == "K15" & config$use_ws) {
+    #config$fp_model <- "K15_ws"
+    fetch_ref <- list_merge(fetch_ref, vars = "ws")
   }
   
   # Select only necessary variables, remove missing data
   data_fetch <- data %>% 
     # Filter out erroneous wind records
-    dplyr::filter(qc_ws == 0) %>%
-    dplyr::select(timestamp, z, zd, dplyr::all_of(fetch_ref$vars)) %>%
-    tidyr::drop_na()
+    filter(qc_ws == 0) %>%
+    select(timestamp, z, zd, all_of(fetch_ref$vars)) %>%
+    drop_na()
   
   # Copy data into list (easier to access in loop)
   data_fetch_list <- data_fetch %>%
-    dplyr::select(-timestamp) %>%
+    select(-timestamp) %>%
     as.list()
   
   # Initialize loop for fetch calculation
@@ -197,9 +173,9 @@ if (control$fetch) {
     
     # Get parameters from data list
     fetch_args <- data_fetch_list %>% 
-      purrr::modify(i) %>% 
+      modify(i) %>% 
       # Splice in percents
-      purrr::prepend(list(pct = control$fetch_pct, dx = control$fetch_dx))
+      prepend(list(pct = config$fetch_pct, dx = config$fetch_dx))
     
     # Calculate fetch lengths
     fetch_list[[i]] <- rlang::exec(fetch_ref$fun, !!!fetch_args)
@@ -208,30 +184,29 @@ if (control$fetch) {
   }
   
   fetch <- fetch_list %>%
-    dplyr::bind_rows() %>%
-    dplyr::bind_cols(dplyr::select(data_fetch, timestamp), .) %>%
-    dplyr::right_join(dplyr::select(data, timestamp), by = "timestamp") %>%
-    dplyr::arrange(timestamp)
+    bind_rows() %>%
+    bind_cols(select(data_fetch, timestamp), .) %>%
+    right_join(select(data, timestamp), by = "timestamp") %>%
+    arrange(timestamp)
   
   fetch_out <- file.path(
-    paths$out, "fetch", 
-    paste0("fetch_", control$fetch_model, "_", tag_out, ".csv")
+    path_out, "fetch", paste0("fetch_", config$fetch_model, "_", tag, ".csv")
   )
-  readr::write_csv(fetch, fetch_out)
+  write_csv(fetch, fetch_out)
   
   # Create documentation for fetch output
   fetch_docu <- settings
   fetch_docu <- append(
     settings, list(
-      files = c(paths$data, paths$era),
+      files = c(file_data, era_files),
       model_params = list(
-        model = control$fetch_model, 
+        model = config$fetch_model, 
         roughness = if ("z0" %in% fetch_ref$vars) "z0" else "ws/ustar",
-        percents = control$fetch_pct
+        percents = config$fetch_pct
       )
     )
   )
-  fetch_docu_out <- stringr::str_replace(fetch_out, ".csv", ".txt")
+  fetch_docu_out <- str_replace(fetch_out, ".csv", ".txt")
   # Save documentation
   sink(fetch_docu_out)
   print(fetch_docu) 
@@ -243,7 +218,7 @@ if (control$fetch) {
 
 ### Calculate 2-D footprints and coverage ======================================
 
-if (control$fp) {
+if (config$fp) {
   
   # Select model function and parameters
   model_ref <- list(
@@ -261,22 +236,21 @@ if (control$fp) {
     )
   )
   
-  model_ref <- purrr::pluck(model_ref, control$fp_model)
+  model_ref <- pluck(model_ref, config$fp_model)
   
   # Add WS to model vars if specified
-  if (control$fp_model == "K15" & control$use_ws) {
-    #control$fp_model <- "K15_ws"
-    model_ref <- purrr::list_merge(model_ref, vars = "ws")
+  if (config$fp_model == "K15" & config$use_ws) {
+    #config$fp_model <- "K15_ws"
+    model_ref <- list_merge(model_ref, vars = "ws")
   }
   
-  fp_fun <- purrr::pluck(model_ref, "fun")
+  fp_fun <- pluck(model_ref, "fun")
   
   # (See references for description of models)
   
   # Create new folder for output files
   fp_out <- file.path(
-    paths$out, "footprint", 
-    paste0("halfhourly_", control$fp_model, "_", tag_out)
+    path_out, "footprint", paste0("halfhourly_", config$fp_model, "_", tag)
   )
   dir.create(fp_out, showWarnings = FALSE)
   
@@ -287,25 +261,29 @@ if (control$fp) {
   # Select only necessary variables, remove missing data
   data_fp <- data %>% 
     # Filter out erroneous wind records
-    dplyr::filter(qc_ws == 0, qc_wd == 0) %>%
+    filter(qc_ws == 0, qc_wd == 0) %>%
     # All models need z, zd, and wd
-    dplyr::select(timestamp, z, zd, wd, dplyr::all_of(model_ref$vars)) %>%
-    tidyr::drop_na()
+    select(timestamp, z, zd, wd, all_of(model_ref$vars)) %>%
+    drop_na()
   
   # Copy data into list (easier to access in footprint loop)
   data_fp_list <- data_fp %>%
-    dplyr::select(-timestamp) %>%
+    select(-timestamp) %>%
     as.list()
   
   # Set up grid
-  grid <- aoi_to_grid(delin, c(md$x_utm, md$y_utm), delta = 1)
+  grid <- aoi_to_grid(
+    delin, c(md$tower$coords$east, md$tower$coords$north), delta = 1
+  )
   
   # Convert AOI to grid
-  aoi_grid <- aoi_to_mask(delin, c(md$x_utm, md$y_utm), delta = 1)
+  aoi_grid <- aoi_to_mask(
+    delin, c(md$tower$coords$east, md$tower$coords$north), delta = 1
+  )
   
   # Write grid to file
-  purrr::imap(
-    purrr::list_modify(grid, aoi = aoi_grid), 
+  imap(
+    list_modify(grid, aoi = aoi_grid), 
     ~ write_matrix(
       .x, file.path(fp_out, "grid", .y), trunc = 0, compress = FALSE
     )
@@ -325,9 +303,9 @@ if (control$fp) {
     
     # Get parameters from data list
     fp_args <- data_fp_list %>% 
-      purrr::modify(i) %>% 
+      modify(i) %>% 
       # Splice in grid
-      purrr::prepend(list(grid = grid))
+      prepend(list(grid = grid))
     
     # Calculate footprint
     fp_temp <- rlang::exec(model_ref$fun, !!!fp_args)
@@ -356,74 +334,67 @@ if (control$fp) {
   }
   
   # Estimate total size of footprint output directory 
-  dir_size <- file.path(fp_out, "footprints") %>% 
-    list.files(full.names = TRUE) %>%
-    magrittr::extract(1:50) %>%
-    purrr::map_dbl(file.size) %>% 
-    mean() %>%
-    magrittr::multiply_by(nrow(data_fp)) %>%
-    magrittr::divide_by(1e9) %>%
-    round(2)
+  dir_size <- fp_out %>% 
+    file.path("footprints") %>% 
+    fs::dir_info() %>% 
+    summarize(size = sum(size)) %>% 
+    pull(size)
   
   cat(
     "\nFinished calculating footprints.\n", 
     "Matrix files can be found in:", file.path(fp_out, "footprints"), "\n",
-    "Total size of directory:", dir_size, "GB\n"
+    "Total size of directory:", dir_size, "\n"
   )
   cat("Writing summary output...")
   
   # Calculate topology and write to file
   topo_out <- file.path(
-    paths$out, "topology", paste0("all_", control$fp_model, "_", tag_out)
+    path_out, "topology", paste0("all_", config$fp_model, "_", tag)
   )
   fp_topo <- fp_topo / n_topo
   write_matrix(fp_topo, topo_out, trunc = 0, compress = FALSE)
   
   # Write file with footprint stats
   fp_stats <- phi %>% 
-    tibble::enframe(name = "timestamp", value = "phi") %>% 
-    dplyr::mutate(timestamp = lubridate::ymd_hms(timestamp)) %>%
-    tidyr::unnest(phi) %>%
+    enframe(name = "timestamp", value = "phi") %>% 
+    mutate(timestamp = ymd_hms(timestamp)) %>%
+    unnest(phi) %>%
     # Classify phi according to Gockede et al. 2008
-    dplyr::mutate(
-      phi_class = dplyr::case_when(
+    mutate(
+      phi_class = case_when(
         # Homogenous measurements
-        dplyr::between(phi, 0.95, 1.00) ~ 0L,
+        between(phi, 0.95, 1.00) ~ 0L,
         # Representative measurements
-        dplyr::between(phi, 0.80, 0.95) ~ 1L,
+        between(phi, 0.80, 0.95) ~ 1L,
         # Acceptable measurements
-        dplyr::between(phi, 0.50, 0.80) ~ 2L,
+        between(phi, 0.50, 0.80) ~ 2L,
         # Disturbed measurements
-        dplyr::between(phi, 0.00, 0.50) ~ 3L
+        between(phi, 0.00, 0.50) ~ 3L
       )
     ) %>% 
     # Give phi vars suffix with model tag
-    dplyr::rename_with(
-      ~ stringr::str_c(.x, "_", tolower(control$fp_model)), c(phi, phi_class)
-    )
+    rename_with(~ str_c(.x, "_", tolower(config$fp_model)), c(phi, phi_class))
   
   # Compute model-specific validity flags
-  if (stringr::str_detect(control$fp_model, "K15")) {
+  if (str_detect(config$fp_model, "K15")) {
     
     # Indicate whether footprint is valid according to Kljun et al. 2015
     fp_stats <- fp_stats %>%
-      dplyr::right_join(
-        dplyr::select(data, timestamp, ustar, mo_length, blh, ws, z, zd, z0), 
+      right_join(
+        select(data, timestamp, ustar, mo_length, blh, ws, z, zd, z0), 
         by = "timestamp"
       )
     
-    if (control$use_ws) {
-      fp_stats <- dplyr::mutate(
-        fp_stats, z0 = calc_z0(ws, ustar, mo_length, z - zd)
-      )
+    if (config$use_ws) {
+      fp_stats <- mutate(fp_stats, z0 = calc_z0(ws, ustar, mo_length, z - zd))
     }
     
     fp_stats <- fp_stats %>%
-      dplyr::arrange(timestamp) %>%
-      dplyr::mutate(
+      arrange(timestamp) %>%
+      mutate(
         zm = z - zd,
         # TODO fix this
-        k15_valid = dplyr::case_when(
+        k15_valid = case_when(
           ustar < 0.1 ~ 0L,
           zm / mo_length > -15.5 ~ 0L,
           # Using roughness sublayer limit as in latest FFP version, not paper
@@ -433,43 +404,43 @@ if (control$fp) {
           TRUE ~ 1L
         )
       ) %>%
-      dplyr::select(-ustar, -mo_length, -ws)
+      select(-ustar, -mo_length, -ws)
   }
   
-  if (control$fp_model == "KM01") {
+  if (config$fp_model == "KM01") {
     # Indicate whether footprint is valid according to Kormann & Meixner 2001
     fp_stats <- fp_stats %>%
-      dplyr::right_join(
-        dplyr::select(data, timestamp, mo_length, z, zd), by = "timestamp"
+      right_join(
+        select(data, timestamp, mo_length, z, zd), by = "timestamp"
       ) %>%
-      dplyr::arrange(timestamp) %>%
-      dplyr::mutate(
+      arrange(timestamp) %>%
+      mutate(
         zm = z - zd,
-        km01_valid = dplyr::if_else(abs(zm / mo_length) > 3, 0L, 1L)
+        km01_valid = if_else(abs(zm / mo_length) > 3, 0L, 1L)
       ) %>%
-      dplyr::select(-z, -zm, -zd)
+      select(-z, -zm, -zd)
   }
   
   fp_stats_out <- file.path(
-    paths$out, "stats", 
-    paste0("footprint_stats_", control$fp_model, "_", tag_out, ".csv")
+    path_out, "stats", 
+    paste0("footprint_stats_", config$fp_model, "_", tag, ".csv")
   )
-  readr::write_csv(fp_stats, fp_stats_out)
+  write_csv(fp_stats, fp_stats_out)
   
   # Create documentation for phi output
   fp_stats_docu <- settings
   fp_stats_docu <- append(
     settings, list(
-      files = c(paths$data, paths$era, paths$delin),
+      files = c(file_data, file_delin, era_files),
       model_params = list(
-        model = control$fp_model, 
+        model = config$fp_model, 
         roughness = if ("z0" %in% model_ref$vars) "z0" else "ws/ustar",
         fetch = attr(grid, "fetch"), 
         res = attr(grid, "res")
       )
     )
   )
-  fp_stats_docu_out <- stringr::str_replace(fp_stats_out, ".csv", ".txt")
+  fp_stats_docu_out <- str_replace(fp_stats_out, ".csv", ".txt")
   # Save documentation
   sink(fp_stats_docu_out)
   print(fp_stats_docu) 
@@ -478,3 +449,4 @@ if (control$fp) {
   cat("done.\n")
 }
 
+# End
